@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE version SYSTEM "../../../lib/pkp/dtd/pluginVersion.dtd">
+
+<!--
+  * plugins/generic/secureRedirect/version.xml
+  *
+  * Hotfix plugin for CVE-2024-7902 open redirect in /login/signOut?source=
+  * Backport of the 3.5.x fix to 3.3.x without upgrade / WAF.
+  *
+  * Plugin version information.
+  -->
+<version>
+	<application>secureRedirect</application>
+	<type>plugins.generic</type>
+	<release>1.0.0.0</release>
+	<date>2026-09-29</date>
+	<class>SecureRedirectPlugin</class>
+	<sitewide>1</sitewide>
+</version>
