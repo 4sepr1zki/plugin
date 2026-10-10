@@ -83,7 +83,7 @@ def print_banner():
 def prompt_target_url():
     print(f"{BOLD}[1] Masukkan URL Target Jurnal OJS yang Ingin Diuji:{RESET}")
     print("    Contoh:")
-    print("    - https://journal.lpkd.or.id")
+    print("    - https://jurnal-kampus.ac.id")
     print("    - https://testerone.my.id")
     print("    - http://127.0.0.1/index.php/Edukasi")
     
