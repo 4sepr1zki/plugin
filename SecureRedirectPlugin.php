@@ -4,7 +4,7 @@
  * @file plugins/generic/secureRedirect/SecureRedirectPlugin.php
  *
  * Hotfix for CVE-2024-7902: open redirect via /login/signOut?source=
- * Compatible with OJS 3.4.x (PSR-4 Namespaces).
+ * Compatible with OJS 3.4.x & 3.5.x (PSR-4 Namespaces).
  */
 
 namespace APP\plugins\generic\secureRedirect;
@@ -32,14 +32,14 @@ class SecureRedirectPlugin extends GenericPlugin {
 	 * @copydoc Plugin::getDisplayName()
 	 */
 	public function getDisplayName() {
-		return 'SecureRedirect Fix (CVE-2024-7902)';
+		return __('plugins.generic.secureRedirect.displayName');
 	}
 
 	/**
 	 * @copydoc Plugin::getDescription()
 	 */
 	public function getDescription() {
-		return 'Block open redirect in login/signOut?source= without upgrade or WAF. Allows only same-host redirects.';
+		return __('plugins.generic.secureRedirect.description');
 	}
 
 	/**
@@ -65,7 +65,7 @@ class SecureRedirectPlugin extends GenericPlugin {
 
 		// 2. Dangerous scheme (javascript:, data:, vbscript:) => home.
 		if (preg_match('/^\s*(javascript|data|vbscript)\s*:/i', $url)) {
-			error_log('SecureRedirect blocked dangerous scheme: ' . $url);
+			error_log('[SecureRedirect] Blocked dangerous scheme: ' . $url);
 			$url = '/';
 			return false;
 		}
@@ -74,23 +74,25 @@ class SecureRedirectPlugin extends GenericPlugin {
 		// is safe. Reject //evil.com, /\evil, \/ tricks, and any @ in path
 		if (preg_match('#^/[^/\\\\]#', $url)) {
 			if (strpos($url, '@') !== false || strpos($url, '\\') !== false) {
-				error_log('SecureRedirect blocked @/backslash in path: ' . $url);
+				error_log('[SecureRedirect] Blocked @/backslash in relative path: ' . $url);
 				$url = '/';
 			}
 			return false;
 		}
-		// Anything relative that is NOT single-slash (/evil is ok, //evil, /\evil, .evil are not)
+
+		// Anything relative that is NOT single-slash (//evil, /\evil, \/evil, .evil) => home.
 		if (strpos($url, '/') === 0 || strpos($url, '\\') === 0 || strpos($url, '.') === 0 || strpos($url, '@') === 0) {
-			error_log('SecureRedirect blocked suspicious relative: ' . $url);
+			error_log('[SecureRedirect] Blocked suspicious relative: ' . $url);
 			$url = '/';
 			return false;
 		}
 
-		// 4. Absolute URL: host must match this server (or base_url host).
+		// 4. Absolute URL: host must match this server (or base_url host / context host).
 		$request = PKPApplication::get()->getRequest();
 		$allowed = [];
 		$serverHost = strtolower($request->getServerHost(false));
 		if ($serverHost !== '') $allowed[] = preg_replace('/^www\./', '', $serverHost);
+		
 		$baseUrl = Config::getVar('general', 'base_url');
 		if (!empty($baseUrl)) {
 			$baseParts = @parse_url($baseUrl);
@@ -99,9 +101,21 @@ class SecureRedirectPlugin extends GenericPlugin {
 			}
 		}
 
+		// Check context base_url
+		$context = $request->getContext();
+		if ($context) {
+			$contextBaseUrl = Config::getVar('general', 'base_url[' . $context->getPath() . ']');
+			if (!empty($contextBaseUrl)) {
+				$ctxParts = @parse_url($contextBaseUrl);
+				if (!empty($ctxParts['host'])) {
+					$allowed[] = preg_replace('/^www\./', '', strtolower($ctxParts['host']));
+				}
+			}
+		}
+
 		$parts = @parse_url($url);
 		if ($parts === false || empty($parts['host'])) {
-			error_log('SecureRedirect blocked unparseable/relative: ' . $url);
+			error_log('[SecureRedirect] Blocked unparseable/relative: ' . $url);
 			$url = '/';
 			return false;
 		}
@@ -116,7 +130,7 @@ class SecureRedirectPlugin extends GenericPlugin {
 			}
 		}
 		if (!$hostAllowed) {
-			error_log('SecureRedirect blocked off-host redirect: ' . $url);
+			error_log('[SecureRedirect] Blocked off-host redirect: ' . $url);
 			$url = '/';
 			return false;
 		}
@@ -127,11 +141,15 @@ class SecureRedirectPlugin extends GenericPlugin {
 		if (preg_match('#^/[/\\\\]#', $path) || preg_match('#^/[/\\\\]#', $decodedPath)
 			|| strpos($path, '\\') !== false || strpos($decodedPath, '\\') !== false
 			|| strpos($url, '@') !== false) {
-			error_log('SecureRedirect blocked suspicious same-host path: ' . $url);
+			error_log('[SecureRedirect] Blocked suspicious same-host path: ' . $url);
 			$url = '/';
 			return false;
 		}
 
-		return false; // same host + clean path => allow
+		return false;
 	}
+}
+
+if (!PKP_STRICT_MODE) {
+    class_alias('\APP\plugins\generic\secureRedirect\SecureRedirectPlugin', '\SecureRedirectPlugin');
 }
