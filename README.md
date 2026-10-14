@@ -1,107 +1,77 @@
-# 🛡️ SecureRedirect Virtual Patch Plugin for OJS (CVE-2024-7902)
+# 🛡️ OJS Security Hardener & Virtual Patch Suite
 
-[![OJS Compatibility](https://img.shields.io/badge/OJS-3.2.x%20%7C%203.3.x%20%7C%203.4.x-blue.svg)](https://pkp.sfu.ca/ojs/)
-[![Vulnerability](https://img.shields.io/badge/Fixes-CVE--2024--7902%20(Open%20Redirect)-red.svg)](https://nvd.nist.gov/vuln/detail/CVE-2024-7902)
+[![OJS Compatibility](https://img.shields.io/badge/OJS-2.4.x%20%7C%203.0--3.3.x%20%7C%203.4.x+-blue.svg)](https://pkp.sfu.ca/ojs/)
+[![Fixes](https://img.shields.io/badge/Mitigates-CVE--2024--7902%20%7C%20CVE--2026--76572%20%7C%20CVE--2026--19906-red.svg)](https://nvd.nist.gov/)
 [![License](https://img.shields.io/badge/License-GPLv3-green.svg)](LICENSE)
 
-**SecureRedirect** adalah plugin *virtual patch* keamanan untuk Open Journal Systems (OJS) yang menutup celah kritis **Open Redirect (CVE-2024-7902)** pada endpoint `/login/signOut?source=` dan `/login/signIn?source=` tanpa perlu melakukan upgrade versi OJS secara besar-besaran maupun mengotori core code (*no core modification*).
+**OjsSecurityHardener** adalah plugin *virtual security patch* dan hardening menyeluruh untuk Open Journal Systems (OJS). Didesain untuk memitigasi kerentanan keamanan kritis dan menangkal serangan sindikat parasite SEO / judi online tanpa perlu merombak core code OJS (*no core modifications*).
 
 ---
 
-## 📌 Penjelasan Kerentanan (CVE-2024-7902)
+## 🔒 Fitur Keamanan & Mitigasi CVE
 
-Pada OJS versi 3.3.x dan sebelumnya, parameter `source` pada proses *sign out* atau *sign in* tidak divalidasi dengan ketat sebelum melakukan redirect HTTP 302:
-* Penyerang dapat membuat link phising seperti:
-  ```text
-  https://journal-victim.com/index.php/journal/login/signOut?source=.attacker.com
-  ```
-  yang akan me-redirect browser korban secara otomatis ke `https://attacker.com` atau subdomain phising.
-* Celah ini sering dimanfaatkan oleh penyerang untuk mencuri kredensial akun reviewer/editor atau menyebarkan malware dengan mencatut nama domain jurnal resmi.
+### 1. Anti Open-Redirect (CVE-2024-7902)
+* **Target Endpoint**: `/login/signOut?source=` dan `/login/signIn?source=`.
+* **Mekanisme**: Memvalidasi URL tujuan redirect via hook `Request::redirect`:
+  - Mengizinkan relative path bersih yang berawalan satu slash (`/index`, `/issue`).
+  - Menolak dan me-reset trik subdomain (`.evil.com`), trik backslash (`/\evil`, `//evil`), serta encoding bypass (`%2F`, `%5C`).
+  - Memastikan redirect absolut hanya mengarah ke host server sah (`base_url` dan host domain vhost).
+  - Mengarahkan request mencurigakan kembali ke root homepage (`/`).
 
----
+### 2. Anti XML External Entity / XXE Injection (CVE-2026-76572)
+* **Target**: Parser XML/XSLT OJS (libxml).
+* **Mekanisme**: Mematikan parser entitas eksternal (`libxml_disable_entity_loader(true)`) sejak inisialisasi boot plugin untuk mencegah attacker membaca file sensitif internal server (seperti `/etc/passwd` atau `config.inc.php`).
 
-## 🔒 Solusi & Strategi Proteksi
+### 3. Strong Cryptographic API Token Generator (CVE-2026-19906)
+* **Target**: Generator token REST API user/profile.
+* **Mekanisme**: Mengganti entropy generator lama yang berbasis waktu/timestamp dengan CSPRNG `random_bytes(32)` yang aman dari brute-force.
 
-Plugin ini mencegat pemanggilan fungsi `Request::redirect` secara terpusat melalui sistem **Hook resmi OJS**:
-1. **Host Verification**: Memastikan URL tujuan redirect hanya mengarah ke host server sendiri (`base_url` dan domain context jurnal yang sah).
-2. **Subdomain Bypass Filter**: Memblokir manipulasi dot-subdomain seperti `?source=.evil.com`.
-3. **Slash-Backslash Normalization**: Memblokir trik `?source=/\evil.com`, `//evil.com`, dan URL-encoded bypass (`%2F`, `%5C`).
-4. **Dangerous Scheme Blocker**: Memblokir skema berbahaya seperti `javascript:`, `data:`, dan `vbscript:`.
-5. **Userinfo Blocker**: Memblokir karakter `@` dalam path (`https://domain@evil.com`).
-6. **Automatic Fallback**: Jika ada request yang mencurigakan, tujuan redirect otomatis di-reset ke root homepage (`/`).
+### 4. Anti-Spam Registrasi & Parasite Bio Judol
+* **Target**: Form registrasi user OJS.
+* **Mekanisme**: Memfilter field input (`biography`, `affiliation`, `signature`, `homepage`, `orcid`) terhadap kata kunci sindikat judi online (seperti `slot`, `gacor`, `judi`, `sbobet`, `depo`, `wd`, linktree spam, dll). Form registrasi otomatis ditolak dengan pesan error jika mengandung kata kunci tersebut.
+
+### 5. Security Response Headers
+* Menyuntikkan header keamanan HTTP:
+  - `X-Content-Type-Options: nosniff`
+  - `X-XSS-Protection: 1; mode=block`
+  - `Referrer-Policy: strict-origin-when-cross-origin`
 
 ---
 
 ## 🖥️ Kompatibilitas Versi OJS
 
 Plugin ini menggunakan **Universal Hybrid Architecture**:
-* **OJS 3.2.x & OJS 3.3.x**: Menggunakan legacy driver `SecureRedirectPlugin.inc.php` berbasis `HookRegistry`.
-* **OJS 3.4.x & OJS 3.5.x**: Menggunakan modern namespaced driver `SecureRedirectPlugin.php` (`APP\plugins\generic\secureRedirect`).
+* **OJS 2.4.x & OJS 3.0.x - 3.3.x**: Menggunakan legacy loader `OjsSecurityHardenerPlugin.inc.php` (`HookRegistry`).
+* **OJS 3.4.x+**: Menggunakan modern namespaced driver `OjsSecurityHardenerPlugin.php` (`APP\plugins\generic\ojsSecurityHardener`).
 
 ---
 
-## 🚀 Cara Pemasangan (Installation Guide)
+## 🚀 Panduan Instalasi
 
-### Metode 1: Upload via Dashboard OJS (Paling Mudah)
-1. Login sebagai **Administrator** atau **Journal Manager**.
-2. Masuk ke menu **Settings** > **Website** > tab **Plugins** > **Installed Plugins**.
-3. Klik tombol **Upload A New Plugin** di pojok kanan atas.
-4. Upload file: **`secureRedirect-v1.0.0.tar.gz`**.
-5. Klik **Save**.
-6. Pada daftar plugin Generic, cari **SecureRedirect Hotfix (CVE-2024-7902)** lalu centang **Enable**.
+### Metode 1: Upload via Dashboard OJS
+1. Download file arsip rilis: **`ojsSecurityHardener-v1.0.0.tar.gz`**.
+2. Login ke OJS sebagai **Administrator** / **Journal Manager**.
+3. Masuk ke menu **Settings** > **Website** > **Plugins** > **Installed Plugins**.
+4. Klik tombol **Upload A New Plugin**.
+5. Unggah file `ojsSecurityHardener-v1.0.0.tar.gz` lalu klik **Save**.
+6. Pada daftar Generic Plugins, cari **OJS Security Hardener & Virtual Patch** lalu centang **Enable**.
 
----
-
-### Metode 2: Manual via Terminal / File Manager (cPanel / aaPanel / SSH)
-1. Ekstrak file tar.gz ke direktori generic plugin OJS:
+### Metode 2: Manual via Server / CLI
+1. Masuk ke direktori plugin generic OJS:
    ```bash
-   tar -xzvf secureRedirect-v1.0.0.tar.gz -C /path-ke-ojs/plugins/generic/
+   cd /path-ke-ojs/plugins/generic/
    ```
-2. Pastikan permission folder disesuaikan:
+2. Ekstrak arsip:
    ```bash
-   chown -R www:www /path-ke-ojs/plugins/generic/secureRedirect
-   chmod -R 755 /path-ke-ojs/plugins/generic/secureRedirect
+   tar -xzvf ojsSecurityHardener-v1.0.0.tar.gz
    ```
-3. Aktifkan plugin melalui **Website Settings** > **Plugins** di Dashboard OJS.
-
----
-
-## 🧪 Verifikasi & Pengujian Keamanan
-
-Repository ini menyertakan script tester otomatis [`test_secure_redirect.py`](test_secure_redirect.py) untuk memverifikasi proteksi dari berbagai vektor serangan:
-
-```bash
-python3 test_secure_redirect.py
-```
-
-### Vektor yang Diuji:
-1. **Subdomain Trick** (`?source=.evil.com`) -> *Aman (Di-reset ke home)*
-2. **Slash-Backslash Bypass** (`?source=/\evil.com`) -> *Aman (Di-reset ke home)*
-3. **Scheme-Relative Bypass** (`?source=//evil.com`) -> *Aman (Di-reset ke home)*
-4. **Absolute Off-Host Redirect** (`?source=https://evil.com`) -> *Aman (Di-reset ke home)*
-5. **Userinfo Trick** (`?source=https://domain@evil.com`) -> *Aman (Di-reset ke home)*
-6. **Dangerous JavaScript Scheme** (`?source=javascript:...`) -> *Aman (Di-reset ke home)*
-7. **Legitimate Local Redirect** (`?source=/index.php/...`) -> *Diizinkan Normal*
-
----
-
-## 📁 Struktur File Repository
-
-```text
-├── SecureRedirectPlugin.inc.php    # Driver untuk OJS 3.2.x & 3.3.x
-├── SecureRedirectPlugin.php        # Driver untuk OJS 3.4.x & 3.5.x
-├── index.php                       # Universal Smart Loader
-├── version.xml                     # Metadata Plugin
-├── locale/                         # Multi-bahasa (id_ID & en_US)
-│   ├── id_ID/locale.po
-│   └── en_US/locale.po
-├── secureRedirect-v1.0.0.tar.gz    # Arsip siap upload via OJS UI
-├── secureRedirect-v1.0.0.zip       # Arsip ZIP
-├── test_secure_redirect.py         # Script automated security tester
-└── README.md                       # Dokumentasi lengkap
-```
+3. Sesuaikan kepemilikan folder webserver (misal `www:www` atau `apache:apache`):
+   ```bash
+   chown -R www:www ojsSecurityHardener/
+   ```
+4. Aktifkan plugin melalui dashboard OJS.
 
 ---
 
 ## 📄 Lisensi
-Didistribusikan di bawah lisensi **GNU General Public License v3.0 (GPLv3)**.
+Didistribusikan di bawah lisensi [GNU General Public License v3.0](LICENSE).
