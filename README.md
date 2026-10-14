@@ -4,7 +4,7 @@
 [![Fixes](https://img.shields.io/badge/Mitigates-CVE--2024--7902%20%7C%20CVE--2026--76572%20%7C%20CVE--2026--19906-red.svg)](https://nvd.nist.gov/)
 [![License](https://img.shields.io/badge/License-GPLv3-green.svg)](LICENSE)
 
-**OjsSecurityHardener** adalah plugin *virtual security patch* dan hardening menyeluruh untuk Open Journal Systems (OJS). Didesain untuk memitigasi kerentanan keamanan kritis dan menangkal serangan sindikat parasite SEO / judi online tanpa perlu merombak core code OJS (*no core modifications*).
+**OjsSecurityHardener** adalah plugin *virtual security patch* dan hardening murni untuk Open Journal Systems (OJS). Didesain khusus untuk memitigasi kerentanan keamanan kritis (CVE) pada core OJS tanpa perlu melakukan modifikasi file core (*no core modifications*).
 
 ---
 
@@ -19,19 +19,15 @@
   - Mengarahkan request mencurigakan kembali ke root homepage (`/`).
 
 ### 2. Anti XML External Entity / XXE Injection (CVE-2026-76572)
-* **Target**: Parser XML/XSLT OJS (libxml).
-* **Mekanisme**: Mematikan parser entitas eksternal (`libxml_disable_entity_loader(true)`) sejak inisialisasi boot plugin untuk mencegah attacker membaca file sensitif internal server (seperti `/etc/passwd` atau `config.inc.php`).
+* **Target**: Parser XML/XSLT OJS (`XSLTransformer` & libxml).
+* **Mekanisme**: Mematikan parser entitas eksternal (`libxml_disable_entity_loader(true)`) sejak inisialisasi boot plugin untuk mencegah penyerang mengeksploitasi parser XML guna membaca file internal server (seperti `/etc/passwd` atau `config.inc.php`).
 
 ### 3. Strong Cryptographic API Token Generator (CVE-2026-19906)
 * **Target**: Generator token REST API user/profile.
 * **Mekanisme**: Mengganti entropy generator lama yang berbasis waktu/timestamp dengan CSPRNG `random_bytes(32)` yang aman dari brute-force.
 
-### 4. Anti-Spam Registrasi & Parasite Bio Judol
-* **Target**: Form registrasi user OJS.
-* **Mekanisme**: Memfilter field input (`biography`, `affiliation`, `signature`, `homepage`, `orcid`) terhadap kata kunci sindikat judi online (seperti `slot`, `gacor`, `judi`, `sbobet`, `depo`, `wd`, linktree spam, dll). Form registrasi otomatis ditolak dengan pesan error jika mengandung kata kunci tersebut.
-
-### 5. Security Response Headers
-* Menyuntikkan header keamanan HTTP:
+### 4. Security Response Headers
+* Menyuntikkan header keamanan HTTP standar:
   - `X-Content-Type-Options: nosniff`
   - `X-XSS-Protection: 1; mode=block`
   - `Referrer-Policy: strict-origin-when-cross-origin`

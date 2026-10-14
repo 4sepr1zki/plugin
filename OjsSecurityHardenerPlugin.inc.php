@@ -9,13 +9,12 @@
  * @class OjsSecurityHardenerPlugin
  * @ingroup plugins_generic_ojsSecurityHardener
  *
- * @brief Comprehensive Virtual Patch and Security Hardener for OJS (OJS 2.4.x - 3.3.x).
- * Mitigates:
+ * @brief Comprehensive Virtual Patch for OJS (OJS 2.4.x - 3.3.x).
+ * Focuses purely on CVE fixes and core defense-in-depth:
  *  - CVE-2024-7902: Open Redirect via login/signOut?source= & login/signIn
  *  - CVE-2026-76572: XML External Entity (XXE) in libxml / DOM / SimpleXML / XSLT
  *  - CVE-2026-19906: Weak/Predictable API Secret Tokens
- *  - Parasite SEO / Judol & Spam Form Registration Filters
- *  - Security Headers: X-Frame-Options, X-Content-Type-Options, X-Robots-Tag on sensitive routes
+ *  - Security Headers: X-Frame-Options, X-Content-Type-Options, Referrer-Policy
  */
 
 if (!class_exists('GenericPlugin')) {
@@ -58,15 +57,11 @@ class OjsSecurityHardenerPlugin extends GenericPlugin {
 				// 1. Hook into Redirect for CVE-2024-7902 Open Redirect
 				if (class_exists('HookRegistry')) {
 					HookRegistry::register('Request::redirect', array($this, 'sanitizeRedirect'));
-					
-					// 2. Hook into User Registration to block judol spam
-					HookRegistry::register('UserRegisterForm::validate', array($this, 'validateRegistration'));
-					HookRegistry::register('RegistrationForm::validate', array($this, 'validateRegistration'));
 
-					// 3. Hook into API Key generation (CVE-2026-19906)
+					// 2. Hook into API Key generation (CVE-2026-19906)
 					HookRegistry::register('APIProfileForm::execute', array($this, 'hardenApiKeyGeneration'));
 
-					// 4. Inject global security headers & anti-parasite SEO protection
+					// 3. Inject global security headers
 					HookRegistry::register('TemplateManager::display', array($this, 'injectSecurityHeaders'));
 				}
 			}
@@ -86,7 +81,7 @@ class OjsSecurityHardenerPlugin extends GenericPlugin {
 	 * @copydoc Plugin::getDescription()
 	 */
 	function getDescription() {
-		return 'Comprehensive security patch suite: fixes Open Redirect (CVE-2024-7902), XXE Injection (CVE-2026-76572), Weak API Tokens (CVE-2026-19906), and blocks SEO parasite judol injections.';
+		return 'Virtual patch suite: fixes Open Redirect (CVE-2024-7902), XXE Injection (CVE-2026-76572), Weak API Tokens (CVE-2026-19906), and injects security headers.';
 	}
 
 	/**
@@ -101,7 +96,6 @@ class OjsSecurityHardenerPlugin extends GenericPlugin {
 	 */
 	function hardenXmlParser() {
 		if (function_exists('libxml_disable_entity_loader')) {
-			// Deprecated in PHP 8.0+ where XXE is disabled by default, but essential for PHP 7.x/5.x
 			@libxml_disable_entity_loader(true);
 		}
 	}
@@ -209,47 +203,6 @@ class OjsSecurityHardenerPlugin extends GenericPlugin {
 	}
 
 	/**
-	 * Mitigate Judol & Gambling Bot Registration Spam
-	 */
-	function validateRegistration($hookName, $args) {
-		$form =& $args[0];
-		
-		// Collect form fields to check
-		$fieldsToCheck = array('biography', 'affiliation', 'signature', 'homepage', 'orcid');
-		$spamKeywords = array(
-			'slot', 'gacor', 'judol', 'judi', 'togel', 'sbobet', 'maxwin',
-			'pragmatic', 'zeus', 'olympus', 'depo', 'wd', 'casino', 'poker',
-			'bandar', 'agen', 'taruhan', 'linktree', 'heylink'
-		);
-
-		foreach ($fieldsToCheck as $field) {
-			$value = '';
-			if (method_exists($form, 'getData')) {
-				$data = $form->getData($field);
-				if (is_array($data)) {
-					$value = implode(' ', array_values($data));
-				} else {
-					$value = (string) $data;
-				}
-			}
-
-			if (!empty($value)) {
-				foreach ($spamKeywords as $spam) {
-					if (stripos($value, $spam) !== false) {
-						if (method_exists($form, 'addError')) {
-							$form->addError($field, 'Registration rejected due to invalid spam keywords in profile.');
-						}
-						error_log('[OjsSecurityHardener] Rejected spam registration containing "' . $spam . '"');
-						return true;
-					}
-				}
-			}
-		}
-
-		return false;
-	}
-
-	/**
 	 * Mitigate CVE-2026-19906: Enforce Cryptographically Secure API Token
 	 */
 	function hardenApiKeyGeneration($hookName, $args) {
@@ -268,7 +221,7 @@ class OjsSecurityHardenerPlugin extends GenericPlugin {
 	}
 
 	/**
-	 * Add Security Response Headers to Prevent Clickjacking and Parasite Embedding
+	 * Add Security Response Headers to Prevent Clickjacking and MIME sniffing
 	 */
 	function injectSecurityHeaders($hookName, $args) {
 		if (!headers_sent()) {
