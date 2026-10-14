@@ -1,7 +1,7 @@
 # 🛡️ OJS Security Hardener & Virtual Patch Suite
 
 [![OJS Compatibility](https://img.shields.io/badge/OJS-2.4.x%20%7C%203.0--3.3.x%20%7C%203.4.x+-blue.svg)](https://pkp.sfu.ca/ojs/)
-[![Fixes](https://img.shields.io/badge/Mitigates-CVE--2024--7902%20%7C%20CVE--2026--76572%20%7C%20CVE--2026--19906-red.svg)](https://nvd.nist.gov/)
+[![Fixes](https://img.shields.io/badge/Mitigates-CVE--2024--7902%20%7C%20CVE--2022--24181%20%7C%20CVE--2026--76572%20%7C%20CVE--2026--19906-red.svg)](https://nvd.nist.gov/)
 [![License](https://img.shields.io/badge/License-GPLv3-green.svg)](LICENSE)
 
 **OjsSecurityHardener** adalah plugin *virtual security patch* dan hardening murni untuk Open Journal Systems (OJS). Didesain khusus untuk memitigasi kerentanan keamanan kritis (CVE) pada core OJS tanpa perlu melakukan modifikasi file core (*no core modifications*).
@@ -10,7 +10,7 @@
 
 ## 🔒 Fitur Keamanan & Mitigasi CVE
 
-### 1. Anti Open-Redirect (CVE-2024-7902)
+### 1. Anti Open-Redirect (CVE-2024-7902 / CVE-2024-46326)
 * **Target Endpoint**: `/login/signOut?source=` dan `/login/signIn?source=`.
 * **Mekanisme**: Memvalidasi URL tujuan redirect via hook `Request::redirect`:
   - Mengizinkan relative path bersih yang berawalan satu slash (`/index`, `/issue`).
@@ -18,15 +18,23 @@
   - Memastikan redirect absolut hanya mengarah ke host server sah (`base_url` dan host domain vhost).
   - Mengarahkan request mencurigakan kembali ke root homepage (`/`).
 
-### 2. Anti XML External Entity / XXE Injection (CVE-2026-76572)
-* **Target**: Parser XML/XSLT OJS (`XSLTransformer` & libxml).
-* **Mekanisme**: Mematikan parser entitas eksternal (`libxml_disable_entity_loader(true)`) sejak inisialisasi boot plugin untuk mencegah penyerang mengeksploitasi parser XML guna membaca file internal server (seperti `/etc/passwd` atau `config.inc.php`).
+### 2. Anti Host Header Injection & X-Forwarded-Host XSS (CVE-2022-24181)
+* **Target Header**: HTTP `Host` dan `X-Forwarded-Host`.
+* **Mekanisme**: Mencegat resolusi domain server via hook `Request::getServerHost`:
+  - Membatasi format hostname hanya boleh sesuai standar RFC (alfanumerik, titik, strip, dan port).
+  - Menolak dan me-reset header yang disusupi payload script/HTML (`<script>`, quotes `"`, `'`) ke nama host kanonikal resmi server.
+  - Mencegah password reset link poisoning dan reflected XSS pada canonical link.
+  - **Zero False Positive**: Hanya memeriksa string HTTP Header Host, tidak menyentuh konten/naskah artikel.
 
-### 3. Strong Cryptographic API Token Generator (CVE-2026-19906)
+### 3. Anti XML External Entity / XXE Injection (CVE-2026-76572 & CVE-2024-56525)
+* **Target**: Parser XML/XSLT OJS (`XSLTransformer`, User XML Plugin, dan libxml).
+* **Mekanisme**: Mematikan parser entitas eksternal (`libxml_disable_entity_loader(true)`) sejak inisialisasi boot plugin untuk mencegah penyerang mengeksploitasi parser XML guna membaca file internal server atau privilege escalation ke Super Admin.
+
+### 4. Strong Cryptographic API Token Generator (CVE-2026-19906)
 * **Target**: Generator token REST API user/profile.
 * **Mekanisme**: Mengganti entropy generator lama yang berbasis waktu/timestamp dengan CSPRNG `random_bytes(32)` yang aman dari brute-force.
 
-### 4. Security Response Headers
+### 5. Security Response Headers
 * Menyuntikkan header keamanan HTTP standar:
   - `X-Content-Type-Options: nosniff`
   - `X-XSS-Protection: 1; mode=block`

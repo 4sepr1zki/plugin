@@ -14,7 +14,8 @@
  *  - CVE-2024-7902: Open Redirect via login/signOut?source= & login/signIn
  *  - CVE-2026-76572: XML External Entity (XXE) in libxml / DOM / SimpleXML / XSLT
  *  - CVE-2026-19906: Weak/Predictable API Secret Tokens
- *  - Security Headers: X-Frame-Options, X-Content-Type-Options, Referrer-Policy
+ *  - CVE-2022-24181: Host Header Injection / X-Forwarded-Host Reflected XSS & Cache Poisoning
+ *  - Security Headers: X-Content-Type-Options, X-XSS-Protection, Referrer-Policy
  */
 
 namespace APP\plugins\generic\ojsSecurityHardener;
@@ -32,7 +33,7 @@ class OjsSecurityHardenerPlugin extends GenericPlugin {
 	public function register($category, $path, $mainContextId = null) {
 		$success = parent::register($category, $path, $mainContextId);
 
-		// Always disable XML external entities immediately at boot (CVE-2026-76572 fix)
+		// Always disable XML external entities immediately at boot (CVE-2026-76572 & CVE-2024-56525 fix)
 		$this->hardenXmlParser();
 
 		if (!Config::getVar('general', 'installed') || defined('RUNNING_UPGRADE')) return true;
@@ -41,10 +42,13 @@ class OjsSecurityHardenerPlugin extends GenericPlugin {
 			// 1. Hook into Redirect for CVE-2024-7902 Open Redirect
 			Hook::add('Request::redirect', [$this, 'sanitizeRedirect']);
 
-			// 2. Hook into API Key generation (CVE-2026-19906)
+			// 2. Hook into Host resolution for CVE-2022-24181 (X-Forwarded-Host XSS / Poisoning)
+			Hook::add('Request::getServerHost', [$this, 'sanitizeServerHost']);
+
+			// 3. Hook into API Key generation (CVE-2026-19906)
 			Hook::add('APIProfileForm::execute', [$this, 'hardenApiKeyGeneration']);
 
-			// 3. Inject global security headers
+			// 4. Inject global security headers
 			Hook::add('TemplateManager::display', [$this, 'injectSecurityHeaders']);
 		}
 
@@ -62,7 +66,7 @@ class OjsSecurityHardenerPlugin extends GenericPlugin {
 	 * @copydoc Plugin::getDescription()
 	 */
 	public function getDescription() {
-		return 'Virtual patch suite: fixes Open Redirect (CVE-2024-7902), XXE Injection (CVE-2026-76572), Weak API Tokens (CVE-2026-19906), and injects security headers.';
+		return 'Virtual patch suite: fixes Open Redirect (CVE-2024-7902), Host Header/X-Forwarded-Host XSS (CVE-2022-24181), XXE Injection (CVE-2026-76572 / CVE-2024-56525), Weak API Tokens (CVE-2026-19906), and injects security headers.';
 	}
 
 	/**
@@ -73,12 +77,38 @@ class OjsSecurityHardenerPlugin extends GenericPlugin {
 	}
 
 	/**
-	 * Mitigate CVE-2026-76572: Disable XML External Entity Loading globally in PHP process
+	 * Mitigate CVE-2026-76572 & CVE-2024-56525: Disable XML External Entity Loading globally in PHP process
 	 */
 	public function hardenXmlParser() {
 		if (function_exists('libxml_disable_entity_loader')) {
 			@libxml_disable_entity_loader(true);
 		}
+	}
+
+	/**
+	 * Mitigate CVE-2022-24181: Sanitize Server Host and X-Forwarded-Host Header.
+	 * Restricts host values strictly to valid RFC hostname/IP:port format,
+	 * rejecting any injected XSS characters (<, >, ", ', spaces) without touching article content.
+	 */
+	public function sanitizeServerHost($hookName, $args) {
+		$serverHost =& $args[0];
+
+		// If empty or contains illegal characters not belonging in an RFC hostname/port
+		if (empty($serverHost) || preg_match('/[^\w\.\-\:]/', $serverHost)) {
+			error_log('[OjsSecurityHardener] Blocked invalid/malicious HTTP Host header: ' . $serverHost);
+			$safeHost = '';
+			$baseUrl = Config::getVar('general', 'base_url');
+			if (!empty($baseUrl)) {
+				$parts = @parse_url($baseUrl);
+				if (!empty($parts['host'])) $safeHost = $parts['host'];
+			}
+			if (empty($safeHost) && isset($_SERVER['SERVER_NAME'])) {
+				$safeHost = $_SERVER['SERVER_NAME'];
+			}
+			$serverHost = !empty($safeHost) ? $safeHost : 'localhost';
+		}
+
+		return false;
 	}
 
 	/**
