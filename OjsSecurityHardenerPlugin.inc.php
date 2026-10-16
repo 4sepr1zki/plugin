@@ -307,6 +307,47 @@ class OjsSecurityHardenerPlugin extends GenericPlugin {
 	}
 
 	/**
+	 * Record a failed login attempt (callable directly or via hook)
+	 */
+	function recordFailedLogin($hookName, $args) {
+		$username = is_array($args) && isset($args[0]) ? strtolower(trim((string)$args[0])) : "unknown";
+		$clientIp = $this->getClientIp();
+		$storageDir = $this->getStorageDir();
+		$lockKey = md5($clientIp . "_" . $username);
+		$attemptsFile = $storageDir . "/attempts.json";
+		$attempts = $this->readJsonFile($attemptsFile);
+		$now = time();
+
+		if (!isset($attempts[$lockKey]) || ($now - $attempts[$lockKey]["first_at"]) > 900) {
+			$attempts[$lockKey] = array("count" => 1, "first_at" => $now, "username" => $username, "ip" => $clientIp);
+		} else {
+			$attempts[$lockKey]["count"]++;
+		}
+
+		$count = $attempts[$lockKey]["count"];
+
+		if ($count >= 5) {
+			$lockFile = $storageDir . "/lockouts.json";
+			$lockouts = $this->readJsonFile($lockFile);
+			$lockouts[$lockKey] = array(
+				"username" => $username,
+				"ip" => $clientIp,
+				"locked_at" => $now,
+				"expires" => $now + 300,
+				"attempts" => $count
+			);
+			$this->writeJsonFile($lockFile, $lockouts);
+			unset($attempts[$lockKey]);
+			$this->logSecurityEvent("ACCOUNT_LOCKED", "Username: $username | IP: $clientIp | Reached 5 failed attempts. Locked 5 mins.", "LOCKOUT");
+		} else {
+			$this->logSecurityEvent("LOGIN_FAILED", "Username: $username | IP: $clientIp | Attempt $count/5", "WARNING");
+		}
+
+		$this->writeJsonFile($attemptsFile, $attempts);
+		return false;
+	}
+
+	/**
 	 * Render Clean Lockout Error Screen
 	 */
 	function renderLockoutPage($username, $remaining) {
@@ -642,9 +683,22 @@ class OjsSecurityHardenerPlugin extends GenericPlugin {
 	}
 
 	function getStorageDir() {
+		// First priority: OJS private files_dir if available
+		if (class_exists('Config')) {
+			$filesDir = Config::getVar('files', 'files_dir');
+			if (!empty($filesDir) && is_dir($filesDir)) {
+				$secDir = rtrim($filesDir, '/') . '/security_hardener';
+				if (!is_dir($secDir)) {
+					@mkdir($secDir, 0775, true);
+				}
+				if (is_dir($secDir) && is_writable($secDir)) {
+					return $secDir;
+				}
+			}
+		}
 		$dir = __DIR__ . '/data';
 		if (!is_dir($dir)) {
-			@mkdir($dir, 0755, true);
+			@mkdir($dir, 0775, true);
 		}
 		return $dir;
 	}

@@ -6,7 +6,7 @@ if (!class_exists('GenericPlugin')) {
     }
 }
 
-require_once "/root/workspace/plugin_repo/OjsSecurityHardenerPlugin.inc.php";
+require_once "/root/repo_plugin_src/OjsSecurityHardenerPlugin.inc.php";
 
 $plugin = new OjsSecurityHardenerPlugin();
 

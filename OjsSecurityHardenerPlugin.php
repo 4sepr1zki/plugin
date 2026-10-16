@@ -545,9 +545,33 @@ class OjsSecurityHardenerPlugin extends GenericPlugin {
 	}
 
 	public function getStorageDir() {
+		// First priority: OJS private files_dir if available
+		if (class_exists('\\PKP\\config\\Config')) {
+			$filesDir = \PKP\config\Config::getVar('files', 'files_dir');
+			if (!empty($filesDir) && is_dir($filesDir)) {
+				$secDir = rtrim($filesDir, '/') . '/security_hardener';
+				if (!is_dir($secDir)) {
+					@mkdir($secDir, 0775, true);
+				}
+				if (is_dir($secDir) && is_writable($secDir)) {
+					return $secDir;
+				}
+			}
+		} elseif (class_exists('Config')) {
+			$filesDir = \Config::getVar('files', 'files_dir');
+			if (!empty($filesDir) && is_dir($filesDir)) {
+				$secDir = rtrim($filesDir, '/') . '/security_hardener';
+				if (!is_dir($secDir)) {
+					@mkdir($secDir, 0775, true);
+				}
+				if (is_dir($secDir) && is_writable($secDir)) {
+					return $secDir;
+				}
+			}
+		}
 		$dir = __DIR__ . '/data';
 		if (!is_dir($dir)) {
-			@mkdir($dir, 0755, true);
+			@mkdir($dir, 0775, true);
 		}
 		return $dir;
 	}
