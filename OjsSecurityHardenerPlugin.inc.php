@@ -18,7 +18,7 @@
  *  - Anti Brute-Force & Login Throttling (Hybrid IP + Account Lockout)
  *  - Login UI Security Notice Banner
  *  - Secret Web Monitoring Dashboard (Path: /?sec_dash=1 or ?sec_admin=1)
- *  - Dedicated Audit Logger (logs/security_audit.log)
+ *  - Dedicated Audit Logger (data/security_audit.log)
  */
 
 if (!class_exists('GenericPlugin')) {
@@ -72,8 +72,8 @@ class OjsSecurityHardenerPlugin extends GenericPlugin {
 				// Virtual Patch CVE-2026-19906 (API Key CSPRNG)
 				HookRegistry::register('APIProfileForm::execute', array($this, 'hardenApiKeyGeneration'));
 
-				// Anti Brute-Force & Login Throttling
-				HookRegistry::register('Validation::login', array($this, 'handleLoginCheck'));
+				// Bulletproof Early Login Interception at Dispatcher level
+				HookRegistry::register('Dispatcher::dispatch', array($this, 'interceptLoginAttempts'));
 
 				// UI Notice on Login Page & Security Headers
 				HookRegistry::register('TemplateManager::display', array($this, 'injectUiAndHeaders'));
@@ -94,7 +94,7 @@ class OjsSecurityHardenerPlugin extends GenericPlugin {
 	 * @copydoc Plugin::getDescription()
 	 */
 	function getDescription() {
-		return 'Enterprise virtual patch suite with Anti Brute-force, Secret Monitoring Dashboard, Dedicated Audit Logger, and mitigations for CVE-2024-56525, CVE-2024-7902, CVE-2022-24181, CVE-2026-76572, and CVE-2026-19906.';
+		return 'Enterprise virtual patch suite with Anti Brute-force, Secret Monitoring Dashboard, Dedicated Audit Logger, and CVE mitigations.';
 	}
 
 	/**
@@ -150,14 +150,12 @@ class OjsSecurityHardenerPlugin extends GenericPlugin {
 			return false;
 		}
 
-		// Block dangerous schemes
 		if (preg_match('/^\s*(javascript|data|vbscript)\s*:/i', $url)) {
 			$this->logSecurityEvent('OPEN_REDIRECT', 'Blocked dangerous scheme URL: ' . $url, 'BLOCKED');
 			$url = '/';
 			return false;
 		}
 
-		// Safe relative path starting with single slash
 		if (preg_match('#^/[^/\\\\]#', $url)) {
 			if (strpos($url, '@') !== false || strpos($url, '\\') !== false) {
 				$this->logSecurityEvent('OPEN_REDIRECT', 'Blocked evasion character in relative URL: ' . $url, 'BLOCKED');
@@ -166,14 +164,12 @@ class OjsSecurityHardenerPlugin extends GenericPlugin {
 			return false;
 		}
 
-		// Suspicious relative bypasses
 		if (strpos($url, '/') === 0 || strpos($url, '\\') === 0 || strpos($url, '.') === 0 || strpos($url, '@') === 0) {
 			$this->logSecurityEvent('OPEN_REDIRECT', 'Blocked suspicious relative redirect: ' . $url, 'BLOCKED');
 			$url = '/';
 			return false;
 		}
 
-		// Absolute URL verification against current host & base_url
 		$allowedHosts = array();
 		if (class_exists('Application')) {
 			$request = Application::get()->getRequest();
@@ -242,93 +238,107 @@ class OjsSecurityHardenerPlugin extends GenericPlugin {
 	}
 
 	/**
-	 * Anti Brute-Force & Login Throttling (Hybrid IP + Account Lockout)
-	 * Hook: Validation::login ($args: array(&$username, &$password, &$nonInteractive, &$reason))
+	 * Bulletproof Early Login Interception at Dispatcher Level
+	 * Intercepts POST to login / signIn before validation occurs
 	 */
-	function handleLoginCheck($hookName, $args) {
-		$username = isset($args[0]) ? strtolower(trim((string)$args[0])) : '';
-		$clientIp = $this->getClientIp();
+	function interceptLoginAttempts($hookName, $args) {
+		$request = is_array($args) && isset($args[0]) ? $args[0] : (class_exists('Application') ? Application::get()->getRequest() : null);
+		if (!$request) return false;
 
-		if (empty($username)) return false;
+		// Check if this is a login submission POST
+		if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['username']) && isset($_POST['password'])) {
+			$username = strtolower(trim((string)$_POST['username']));
+			$clientIp = $this->getClientIp();
+			$storageDir = $this->getStorageDir();
+			$lockFile = $storageDir . '/lockouts.json';
+			$lockouts = $this->readJsonFile($lockFile);
 
-		$lockFile = $this->getStorageDir() . '/lockouts.json';
-		$lockouts = $this->readJsonFile($lockFile);
+			$lockKey = md5($clientIp . '_' . $username);
+			$now = time();
 
-		// Specific Account+IP Key (Prevents whole-office NAT lockout!)
-		$lockKey = md5($clientIp . '_' . $username);
-		$now = time();
-
-		// Check if actively locked
-		if (isset($lockouts[$lockKey]) && $lockouts[$lockKey]['expires'] > $now) {
-			$remaining = ceil(($lockouts[$lockKey]['expires'] - $now) / 60);
-			$this->logSecurityEvent('BRUTE_FORCE_BLOCKED', "User: $username | IP: $clientIp | Locked for $remaining more mins", 'REJECTED');
-			
-			// Show clean lockout message to the user
-			if (class_exists('Validation')) {
-				header('HTTP/1.1 429 Too Many Requests');
-				echo '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Account Temporarily Locked</title>';
-				echo '<style>body{font-family:sans-serif;background:#f8fafc;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;}';
-				echo '.card{background:#fff;padding:30px;border-radius:8px;box-shadow:0 4px 6px -1px rgba(0,0,0,0.1);max-width:460px;text-align:center;}';
-				echo 'h2{color:#b91c1c;margin-top:0;}p{color:#475569;line-height:1.6;}a{color:#2563eb;text-decoration:none;font-weight:600;}</style></head>';
-				echo '<body><div class="card"><h2>⚠️ Akun Terkunci Sementara</h2>';
-				echo '<p>Terlalu banyak percobaan login gagal pada akun <strong>' . htmlspecialchars($username) . '</strong>.<br>';
-				echo 'Demi keamanan sistem, login ditangguhkan selama <strong>' . $remaining . ' menit</strong> ke depan.</p>';
-				echo '<p><a href="javascript:history.back()">« Kembali ke Halaman Login</a></p></div></body></html>';
+			// 1. Check if user is actively locked out
+			if (isset($lockouts[$lockKey]) && $lockouts[$lockKey]['expires'] > $now) {
+				$remaining = ceil(($lockouts[$lockKey]['expires'] - $now) / 60);
+				$this->logSecurityEvent('BRUTE_FORCE_BLOCKED', "User: $username | IP: $clientIp | Locked for $remaining more mins", 'REJECTED');
+				$this->renderLockoutPage($username, $remaining);
 				exit;
 			}
-			return true;
-		}
 
-		// Register post-check hook to detect failed password
-		if (class_exists('HookRegistry')) {
-			HookRegistry::register('Validation::loginFailed', array($this, 'recordFailedLogin'));
+			// 2. Track failed login attempt on shutdown (if login failed)
+			register_shutdown_function(function() use ($username, $clientIp, $lockKey, $storageDir) {
+				// If session does not have logged in user ID after POST, login failed
+				if (class_exists('Validation') && !Validation::isLoggedIn()) {
+					$attemptsFile = $storageDir . '/attempts.json';
+					$attempts = $this->readJsonFile($attemptsFile);
+					$now = time();
+
+					if (!isset($attempts[$lockKey]) || ($now - $attempts[$lockKey]['first_at']) > 900) {
+						$attempts[$lockKey] = array('count' => 1, 'first_at' => $now, 'username' => $username, 'ip' => $clientIp);
+					} else {
+						$attempts[$lockKey]['count']++;
+					}
+
+					$count = $attempts[$lockKey]['count'];
+
+					if ($count >= 5) {
+						$lockFile = $storageDir . '/lockouts.json';
+						$lockouts = $this->readJsonFile($lockFile);
+						$lockouts[$lockKey] = array(
+							'username' => $username,
+							'ip' => $clientIp,
+							'locked_at' => $now,
+							'expires' => $now + 300,
+							'attempts' => $count
+						);
+						$this->writeJsonFile($lockFile, $lockouts);
+						unset($attempts[$lockKey]);
+
+						$this->logSecurityEvent('ACCOUNT_LOCKED', "Username: $username | IP: $clientIp | Reached 5 failed attempts. Locked 5 mins.", 'LOCKOUT');
+					} else {
+						$this->logSecurityEvent('LOGIN_FAILED', "Username: $username | IP: $clientIp | Attempt $count/5", 'WARNING');
+					}
+
+					$this->writeJsonFile($attemptsFile, $attempts);
+				}
+			});
 		}
 
 		return false;
 	}
 
 	/**
-	 * Record Failed Login Attempt
+	 * Render Clean Lockout Error Screen
 	 */
-	function recordFailedLogin($hookName, $args) {
-		$username = isset($args[0]) ? strtolower(trim((string)$args[0])) : 'unknown';
-		$clientIp = $this->getClientIp();
-		$lockKey = md5($clientIp . '_' . $username);
-
-		$attemptsFile = $this->getStorageDir() . '/attempts.json';
-		$attempts = $this->readJsonFile($attemptsFile);
-
-		$now = time();
-		// Clean up window (older than 15 mins)
-		if (!isset($attempts[$lockKey]) || ($now - $attempts[$lockKey]['first_at']) > 900) {
-			$attempts[$lockKey] = array('count' => 1, 'first_at' => $now, 'username' => $username, 'ip' => $clientIp);
-		} else {
-			$attempts[$lockKey]['count']++;
-		}
-
-		$count = $attempts[$lockKey]['count'];
-
-		if ($count >= 5) {
-			// Trigger Lockout for 5 minutes (300 seconds)
-			$lockFile = $this->getStorageDir() . '/lockouts.json';
-			$lockouts = $this->readJsonFile($lockFile);
-			$lockouts[$lockKey] = array(
-				'username' => $username,
-				'ip' => $clientIp,
-				'locked_at' => $now,
-				'expires' => $now + 300,
-				'attempts' => $count
-			);
-			$this->writeJsonFile($lockFile, $lockouts);
-			unset($attempts[$lockKey]);
-
-			$this->logSecurityEvent('ACCOUNT_LOCKED', "Username: $username | IP: $clientIp | Reached 5 failed attempts. Locked 5 mins.", 'LOCKOUT');
-		} else {
-			$this->logSecurityEvent('LOGIN_FAILED', "Username: $username | IP: $clientIp | Attempt $count/5", 'WARNING');
-		}
-
-		$this->writeJsonFile($attemptsFile, $attempts);
-		return false;
+	function renderLockoutPage($username, $remaining) {
+		header('HTTP/1.1 429 Too Many Requests');
+		header('Content-Type: text/html; charset=UTF-8');
+		?>
+		<!DOCTYPE html>
+		<html lang="id">
+		<head>
+			<meta charset="UTF-8">
+			<title>Akun Terkunci Sementara - OJS Security</title>
+			<style>
+				body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f172a; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; color: #f8fafc; }
+				.card { background: #1e293b; padding: 36px; border-radius: 12px; box-shadow: 0 10px 25px -5px rgba(0,0,0,0.5); max-width: 480px; text-align: center; border: 1px solid #334155; }
+				h2 { color: #f87171; margin-top: 0; font-size: 22px; display: flex; align-items: center; justify-content: center; gap: 8px; }
+				p { color: #cbd5e1; line-height: 1.6; margin: 16px 0; font-size: 14px; }
+				.timer { background: #0f172a; padding: 8px 16px; border-radius: 6px; display: inline-block; font-weight: 700; color: #38bdf8; border: 1px solid #334155; }
+				a { color: #38bdf8; text-decoration: none; font-weight: 600; display: inline-block; margin-top: 14px; }
+				a:hover { text-decoration: underline; }
+			</style>
+		</head>
+		<body>
+			<div class="card">
+				<h2>⚠️ Akun Ditangguhkan Sementara</h2>
+				<p>Terlalu banyak percobaan password salah pada akun <strong><?php echo htmlspecialchars($username); ?></strong>.</p>
+				<div class="timer">Tunggu: <?php echo intval($remaining); ?> Menit</div>
+				<p>Untuk membuka kunci akun ini secara instan, silakan hubungi Administrator atau buka kunci melalui Security Dashboard.</p>
+				<a href="javascript:history.back()">« Kembali ke Halaman Login</a>
+			</div>
+		</body>
+		</html>
+		<?php
 	}
 
 	/**
@@ -338,14 +348,12 @@ class OjsSecurityHardenerPlugin extends GenericPlugin {
 		$templateMgr =& $args[0];
 		$template = isset($args[1]) ? $args[1] : '';
 
-		// Global Security Headers
 		if (!headers_sent()) {
 			@header('X-Content-Type-Options: nosniff');
 			@header('X-XSS-Protection: 1; mode=block');
 			@header('Referrer-Policy: strict-origin-when-cross-origin');
 		}
 
-		// Inject Notice on Login Template
 		if (strpos($template, 'userLogin.tpl') !== false || strpos($template, 'login.tpl') !== false) {
 			$noticeHtml = '
 			<div class="ojs-security-notice" style="margin: 15px 0; padding: 12px 16px; border-radius: 6px; font-size: 13px; line-height: 1.5; background-color: #f0fdf4; color: #166534; border: 1px solid #bbf7d0; display: flex; align-items: center; gap: 10px;">
@@ -355,7 +363,6 @@ class OjsSecurityHardenerPlugin extends GenericPlugin {
 				</div>
 			</div>';
 			$templateMgr->register_outputfilter(function($output) use ($noticeHtml) {
-				// Inject before closing form or submit button
 				if (strpos($output, '</form>') !== false) {
 					return str_replace('</form>', $noticeHtml . '</form>', $output);
 				}
@@ -416,20 +423,15 @@ class OjsSecurityHardenerPlugin extends GenericPlugin {
 			}
 		}
 
-		// If not authenticated, render Login Modal
 		if (empty($_SESSION['ojs_sec_auth'])) {
 			$this->renderDashboardLogin($loginError);
 			exit;
 		}
 
-		// Render Full Modern Dashboard
 		$this->renderDashboardView($storageDir);
 		exit;
 	}
 
-	/**
-	 * Render Secret Dashboard Login View
-	 */
 	function renderDashboardLogin($error = '') {
 		header('Content-Type: text/html; charset=UTF-8');
 		?>
@@ -451,7 +453,7 @@ class OjsSecurityHardenerPlugin extends GenericPlugin {
 				label { display: block; font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; color: #cbd5e1; margin-bottom: 6px; }
 				input[type="password"] { width: 100%; padding: 12px 14px; background: #0f172a; border: 1px solid #475569; border-radius: 6px; color: #fff; font-size: 14px; outline: none; }
 				input[type="password"]:focus { border-color: #38bdf8; box-shadow: 0 0 0 2px rgba(56,189,248,0.2); }
-				button { width: 100%; padding: 12px; background: #2563eb; color: #fff; border: none; border-radius: 6px; font-weight: 600; cursor: pointer; font-size: 14px; transition: background 0.2s; }
+				button { width: 100%; padding: 12px; background: #2563eb; color: #fff; border: none; border-radius: 6px; font-weight: 600; cursor: pointer; font-size: 14px; }
 				button:hover { background: #1d4ed8; }
 				.error { background: #450a0a; color: #f87171; border: 1px solid #991b1b; padding: 10px 14px; border-radius: 6px; font-size: 13px; margin-bottom: 18px; }
 			</style>
@@ -475,15 +477,11 @@ class OjsSecurityHardenerPlugin extends GenericPlugin {
 		<?php
 	}
 
-	/**
-	 * Render Full Modern Security Dashboard
-	 */
 	function renderDashboardView($storageDir) {
 		$lockFile = $storageDir . '/lockouts.json';
 		$lockouts = $this->readJsonFile($lockFile);
 		$logFile = $storageDir . '/security_audit.log';
 
-		// Parse Log Statistics
 		$totalEvents = 0;
 		$bruteBlocks = 0;
 		$redirectBlocks = 0;
@@ -535,11 +533,7 @@ class OjsSecurityHardenerPlugin extends GenericPlugin {
 				th, td { padding: 12px; text-align: left; border-bottom: 1px solid #334155; }
 				th { background: #0f172a; color: #94a3b8; font-weight: 600; text-transform: uppercase; font-size: 11px; }
 				tr:hover td { background: #1a2333; }
-				.tag { padding: 3px 8px; border-radius: 4px; font-size: 11px; font-weight: 700; }
-				.tag-blocked { background: #450a0a; color: #f87171; }
-				.tag-warning { background: #451a03; color: #fbbf24; }
-				.tag-lockout { background: #581c87; color: #c084fc; }
-				.btn-unlock { background: #0284c7; color: #fff; padding: 4px 10px; border-radius: 4px; text-decoration: none; font-size: 12px; font-weight: 600; }
+				.btn-unlock { background: #0284c7; color: #fff; padding: 6px 14px; border-radius: 6px; text-decoration: none; font-size: 12px; font-weight: 600; display: inline-flex; align-items: center; gap: 4px; }
 				.btn-unlock:hover { background: #0369a1; }
 				pre.log-viewer { background: #090d16; padding: 16px; border-radius: 6px; font-family: monospace; font-size: 12px; color: #a5f3fc; overflow-x: auto; max-height: 400px; }
 			</style>
@@ -551,7 +545,6 @@ class OjsSecurityHardenerPlugin extends GenericPlugin {
 					<a href="?sec_dash=1&logout=1" class="btn-logout">Logout</a>
 				</header>
 
-				<!-- Security Badges Status -->
 				<div class="badges">
 					<span style="color:#94a3b8; font-size:12px; margin-right:4px;">Virtual Patches Active:</span>
 					<span class="badge">✓ CVE-2024-56525 (XXE SuperAdmin)</span>
@@ -561,7 +554,6 @@ class OjsSecurityHardenerPlugin extends GenericPlugin {
 					<span class="badge">✓ Anti Brute-force Hybrid Lockout</span>
 				</div>
 
-				<!-- Metric Stats Grid -->
 				<div class="grid-stats">
 					<div class="stat-card accent">
 						<h3>Total Threat Events Logged</h3>
@@ -581,7 +573,6 @@ class OjsSecurityHardenerPlugin extends GenericPlugin {
 					</div>
 				</div>
 
-				<!-- Active Lockouts Panel -->
 				<div class="panel">
 					<h2>🔒 Akun / IP Yang Sedang Dikunci Sementara (Active Lockouts)</h2>
 					<?php if (empty($lockouts)): ?>
@@ -594,7 +585,7 @@ class OjsSecurityHardenerPlugin extends GenericPlugin {
 									<th>IP Address</th>
 									<th>Waktu Terkunci</th>
 									<th>Sisa Waktu</th>
-									<th>Aksi</th>
+									<th>Aksi Buka Kunci</th>
 								</tr>
 							</thead>
 							<tbody>
@@ -606,7 +597,7 @@ class OjsSecurityHardenerPlugin extends GenericPlugin {
 									<td><code><?php echo htmlspecialchars($item['ip']); ?></code></td>
 									<td><?php echo date('H:i:s d/m/Y', $item['locked_at']); ?></td>
 									<td><span style="color:#f87171; font-weight:600;"><?php echo $remaining; ?> Menit</span></td>
-									<td><a href="?sec_dash=1&unlock=<?php echo urlencode($key); ?>" class="btn-unlock" onclick="return confirm('Buka kunci akun ini sekarang?')">🔓 Quick Unlock</a></td>
+									<td><a href="?sec_dash=1&unlock=<?php echo urlencode($key); ?>" class="btn-unlock" onclick="return confirm('Buka kunci akun ini sekarang?')">🔓 Quick Unlock (Buka Akun)</a></td>
 								</tr>
 								<?php endforeach; ?>
 							</tbody>
@@ -614,7 +605,6 @@ class OjsSecurityHardenerPlugin extends GenericPlugin {
 					<?php endif; ?>
 				</div>
 
-				<!-- Real-time Security Log Viewer -->
 				<div class="panel">
 					<h2>📋 Real-time Live Security Audit Log (Last 30 Events)</h2>
 					<pre class="log-viewer"><?php 
@@ -633,9 +623,6 @@ class OjsSecurityHardenerPlugin extends GenericPlugin {
 		<?php
 	}
 
-	/**
-	 * Append Security Audit Log
-	 */
 	function logSecurityEvent($eventType, $details, $status = 'INFO') {
 		$storageDir = $this->getStorageDir();
 		$logFile = $storageDir . '/security_audit.log';
@@ -645,9 +632,6 @@ class OjsSecurityHardenerPlugin extends GenericPlugin {
 		@file_put_contents($logFile, $entry, FILE_APPEND | LOCK_EX);
 	}
 
-	/**
-	 * Safe Client IP resolver
-	 */
 	function getClientIp() {
 		if (!empty($_SERVER['HTTP_CF_CONNECTING_IP'])) return $_SERVER['HTTP_CF_CONNECTING_IP'];
 		if (!empty($_SERVER['HTTP_X_FORWARDED_FOR'])) {
@@ -657,9 +641,6 @@ class OjsSecurityHardenerPlugin extends GenericPlugin {
 		return isset($_SERVER['REMOTE_ADDR']) ? $_SERVER['REMOTE_ADDR'] : '127.0.0.1';
 	}
 
-	/**
-	 * Get persistent storage directory
-	 */
 	function getStorageDir() {
 		$dir = __DIR__ . '/data';
 		if (!is_dir($dir)) {

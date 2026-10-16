@@ -38,7 +38,7 @@ class OjsSecurityHardenerPlugin extends GenericPlugin {
 			Hook::add('Request::redirect', [$this, 'sanitizeRedirect']);
 			Hook::add('Request::getServerHost', [$this, 'sanitizeServerHost']);
 			Hook::add('APIProfileForm::execute', [$this, 'hardenApiKeyGeneration']);
-			Hook::add('Validation::login', [$this, 'handleLoginCheck']);
+			Hook::add('Dispatcher::dispatch', [$this, 'interceptLoginAttempts']);
 			Hook::add('TemplateManager::display', [$this, 'injectUiAndHeaders']);
 		}
 
@@ -166,75 +166,92 @@ class OjsSecurityHardenerPlugin extends GenericPlugin {
 		return false;
 	}
 
-	public function handleLoginCheck($hookName, $args) {
-		$username = isset($args[0]) ? strtolower(trim((string)$args[0])) : '';
-		$clientIp = $this->getClientIp();
+	public function interceptLoginAttempts($hookName, $args) {
+		if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['username']) && isset($_POST['password'])) {
+			$username = strtolower(trim((string)$_POST['username']));
+			$clientIp = $this->getClientIp();
+			$storageDir = $this->getStorageDir();
+			$lockFile = $storageDir . '/lockouts.json';
+			$lockouts = $this->readJsonFile($lockFile);
 
-		if (empty($username)) return false;
+			$lockKey = md5($clientIp . '_' . $username);
+			$now = time();
 
-		$lockFile = $this->getStorageDir() . '/lockouts.json';
-		$lockouts = $this->readJsonFile($lockFile);
+			if (isset($lockouts[$lockKey]) && $lockouts[$lockKey]['expires'] > $now) {
+				$remaining = ceil(($lockouts[$lockKey]['expires'] - $now) / 60);
+				$this->logSecurityEvent('BRUTE_FORCE_BLOCKED', "User: $username | IP: $clientIp | Locked for $remaining more mins", 'REJECTED');
+				$this->renderLockoutPage($username, $remaining);
+				exit;
+			}
 
-		$lockKey = md5($clientIp . '_' . $username);
-		$now = time();
+			register_shutdown_function(function() use ($username, $clientIp, $lockKey, $storageDir) {
+				$attemptsFile = $storageDir . '/attempts.json';
+				$attempts = $this->readJsonFile($attemptsFile);
+				$now = time();
 
-		if (isset($lockouts[$lockKey]) && $lockouts[$lockKey]['expires'] > $now) {
-			$remaining = ceil(($lockouts[$lockKey]['expires'] - $now) / 60);
-			$this->logSecurityEvent('BRUTE_FORCE_BLOCKED', "User: $username | IP: $clientIp | Locked for $remaining more mins", 'REJECTED');
-			
-			header('HTTP/1.1 429 Too Many Requests');
-			echo '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Account Temporarily Locked</title>';
-			echo '<style>body{font-family:sans-serif;background:#f8fafc;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;}';
-			echo '.card{background:#fff;padding:30px;border-radius:8px;box-shadow:0 4px 6px -1px rgba(0,0,0,0.1);max-width:460px;text-align:center;}';
-			echo 'h2{color:#b91c1c;margin-top:0;}p{color:#475569;line-height:1.6;}a{color:#2563eb;text-decoration:none;font-weight:600;}</style></head>';
-			echo '<body><div class="card"><h2>⚠️ Akun Terkunci Sementara</h2>';
-			echo '<p>Terlalu banyak percobaan login gagal pada akun <strong>' . htmlspecialchars($username) . '</strong>.<br>';
-			echo 'Demi keamanan sistem, login ditangguhkan selama <strong>' . $remaining . ' menit</strong> ke depan.</p>';
-			echo '<p><a href="javascript:history.back()">« Kembali ke Halaman Login</a></p></div></body></html>';
-			exit;
+				if (!isset($attempts[$lockKey]) || ($now - $attempts[$lockKey]['first_at']) > 900) {
+					$attempts[$lockKey] = ['count' => 1, 'first_at' => $now, 'username' => $username, 'ip' => $clientIp];
+				} else {
+					$attempts[$lockKey]['count']++;
+				}
+
+				$count = $attempts[$lockKey]['count'];
+
+				if ($count >= 5) {
+					$lockFile = $storageDir . '/lockouts.json';
+					$lockouts = $this->readJsonFile($lockFile);
+					$lockouts[$lockKey] = [
+						'username' => $username,
+						'ip' => $clientIp,
+						'locked_at' => $now,
+						'expires' => $now + 300,
+						'attempts' => $count
+					];
+					$this->writeJsonFile($lockFile, $lockouts);
+					unset($attempts[$lockKey]);
+
+					$this->logSecurityEvent('ACCOUNT_LOCKED', "Username: $username | IP: $clientIp | Reached 5 failed attempts. Locked 5 mins.", 'LOCKOUT');
+				} else {
+					$this->logSecurityEvent('LOGIN_FAILED', "Username: $username | IP: $clientIp | Attempt $count/5", 'WARNING');
+				}
+
+				$this->writeJsonFile($attemptsFile, $attempts);
+			});
 		}
 
-		Hook::add('Validation::loginFailed', [$this, 'recordFailedLogin']);
 		return false;
 	}
 
-	public function recordFailedLogin($hookName, $args) {
-		$username = isset($args[0]) ? strtolower(trim((string)$args[0])) : 'unknown';
-		$clientIp = $this->getClientIp();
-		$lockKey = md5($clientIp . '_' . $username);
-
-		$attemptsFile = $this->getStorageDir() . '/attempts.json';
-		$attempts = $this->readJsonFile($attemptsFile);
-
-		$now = time();
-		if (!isset($attempts[$lockKey]) || ($now - $attempts[$lockKey]['first_at']) > 900) {
-			$attempts[$lockKey] = ['count' => 1, 'first_at' => $now, 'username' => $username, 'ip' => $clientIp];
-		} else {
-			$attempts[$lockKey]['count']++;
-		}
-
-		$count = $attempts[$lockKey]['count'];
-
-		if ($count >= 5) {
-			$lockFile = $this->getStorageDir() . '/lockouts.json';
-			$lockouts = $this->readJsonFile($lockFile);
-			$lockouts[$lockKey] = [
-				'username' => $username,
-				'ip' => $clientIp,
-				'locked_at' => $now,
-				'expires' => $now + 300,
-				'attempts' => $count
-			];
-			$this->writeJsonFile($lockFile, $lockouts);
-			unset($attempts[$lockKey]);
-
-			$this->logSecurityEvent('ACCOUNT_LOCKED', "Username: $username | IP: $clientIp | Reached 5 failed attempts. Locked 5 mins.", 'LOCKOUT');
-		} else {
-			$this->logSecurityEvent('LOGIN_FAILED', "Username: $username | IP: $clientIp | Attempt $count/5", 'WARNING');
-		}
-
-		$this->writeJsonFile($attemptsFile, $attempts);
-		return false;
+	public function renderLockoutPage($username, $remaining) {
+		header('HTTP/1.1 429 Too Many Requests');
+		header('Content-Type: text/html; charset=UTF-8');
+		?>
+		<!DOCTYPE html>
+		<html lang="id">
+		<head>
+			<meta charset="UTF-8">
+			<title>Akun Terkunci Sementara - OJS Security</title>
+			<style>
+				body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f172a; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; color: #f8fafc; }
+				.card { background: #1e293b; padding: 36px; border-radius: 12px; box-shadow: 0 10px 25px -5px rgba(0,0,0,0.5); max-width: 480px; text-align: center; border: 1px solid #334155; }
+				h2 { color: #f87171; margin-top: 0; font-size: 22px; display: flex; align-items: center; justify-content: center; gap: 8px; }
+				p { color: #cbd5e1; line-height: 1.6; margin: 16px 0; font-size: 14px; }
+				.timer { background: #0f172a; padding: 8px 16px; border-radius: 6px; display: inline-block; font-weight: 700; color: #38bdf8; border: 1px solid #334155; }
+				a { color: #38bdf8; text-decoration: none; font-weight: 600; display: inline-block; margin-top: 14px; }
+				a:hover { text-decoration: underline; }
+			</style>
+		</head>
+		<body>
+			<div class="card">
+				<h2>⚠️ Akun Ditangguhkan Sementara</h2>
+				<p>Terlalu banyak percobaan password salah pada akun <strong><?php echo htmlspecialchars($username); ?></strong>.</p>
+				<div class="timer">Tunggu: <?php echo intval($remaining); ?> Menit</div>
+				<p>Untuk membuka kunci akun ini secara instan, silakan hubungi Administrator atau buka kunci melalui Security Dashboard.</p>
+				<a href="javascript:history.back()">« Kembali ke Halaman Login</a>
+			</div>
+		</body>
+		</html>
+		<?php
 	}
 
 	public function injectUiAndHeaders($hookName, $args) {
@@ -419,7 +436,7 @@ class OjsSecurityHardenerPlugin extends GenericPlugin {
 				th, td { padding: 12px; text-align: left; border-bottom: 1px solid #334155; }
 				th { background: #0f172a; color: #94a3b8; font-weight: 600; text-transform: uppercase; font-size: 11px; }
 				tr:hover td { background: #1a2333; }
-				.btn-unlock { background: #0284c7; color: #fff; padding: 4px 10px; border-radius: 4px; text-decoration: none; font-size: 12px; font-weight: 600; }
+				.btn-unlock { background: #0284c7; color: #fff; padding: 6px 14px; border-radius: 6px; text-decoration: none; font-size: 12px; font-weight: 600; display: inline-flex; align-items: center; gap: 4px; }
 				.btn-unlock:hover { background: #0369a1; }
 				pre.log-viewer { background: #090d16; padding: 16px; border-radius: 6px; font-family: monospace; font-size: 12px; color: #a5f3fc; overflow-x: auto; max-height: 400px; }
 			</style>
@@ -471,7 +488,7 @@ class OjsSecurityHardenerPlugin extends GenericPlugin {
 									<th>IP Address</th>
 									<th>Waktu Terkunci</th>
 									<th>Sisa Waktu</th>
-									<th>Aksi</th>
+									<th>Aksi Buka Kunci</th>
 								</tr>
 							</thead>
 							<tbody>
@@ -483,7 +500,7 @@ class OjsSecurityHardenerPlugin extends GenericPlugin {
 									<td><code><?php echo htmlspecialchars($item['ip']); ?></code></td>
 									<td><?php echo date('H:i:s d/m/Y', $item['locked_at']); ?></td>
 									<td><span style="color:#f87171; font-weight:600;"><?php echo $remaining; ?> Menit</span></td>
-									<td><a href="?sec_dash=1&unlock=<?php echo urlencode($key); ?>" class="btn-unlock" onclick="return confirm('Buka kunci akun ini sekarang?')">🔓 Quick Unlock</a></td>
+									<td><a href="?sec_dash=1&unlock=<?php echo urlencode($key); ?>" class="btn-unlock" onclick="return confirm('Buka kunci akun ini sekarang?')">🔓 Quick Unlock (Buka Akun)</a></td>
 								</tr>
 								<?php endforeach; ?>
 							</tbody>
