@@ -396,22 +396,22 @@ class OjsSecurityHardenerPlugin extends GenericPlugin {
 		}
 
 		if (strpos($template, 'userLogin.tpl') !== false || strpos($template, 'login.tpl') !== false) {
-			$noticeHtml = '
-			<div class="ojs-security-notice" style="margin: 15px 0; padding: 12px 16px; border-radius: 6px; font-size: 13px; line-height: 1.5; background-color: #f0fdf4; color: #166534; border: 1px solid #bbf7d0; display: flex; align-items: center; gap: 10px;">
-				<span style="font-size: 18px;">🛡️</span>
-				<div>
-					<strong>Perlindungan Akun Aktif:</strong> Sistem menerapkan batas maksimal 5x percobaan gagal. Akun akan terkunci sementara selama 5 menit jika melebihi batas.
-				</div>
-			</div>';
-			$templateMgr->register_outputfilter(function($output) use ($noticeHtml) {
-				if (strpos($output, '</form>') !== false) {
-					return str_replace('</form>', $noticeHtml . '</form>', $output);
-				}
-				return $output . $noticeHtml;
-			});
+			if (method_exists($templateMgr, 'registerFilter')) {
+				$templateMgr->registerFilter('output', array($this, 'filterLoginOutput'));
+			}
 		}
 
 		return false;
+	}
+
+	function filterLoginOutput($output, $smarty) {
+		$noticeHtml = '<div class="ojs-security-notice" style="margin: 15px 0; padding: 12px 16px; border-radius: 6px; font-size: 13px; line-height: 1.5; background-color: #f0fdf4; color: #166534; border: 1px solid #bbf7d0; display: flex; align-items: center; gap: 10px;"><span style="font-size: 18px;">🛡️</span><div><strong>Perlindungan Akun Aktif:</strong> Menghindari brute force, sistem menerapkan batas maksimal 5x percobaan gagal. Akun akan terkunci sementara selama 5 menit jika melebihi batas.</div></div>';
+		if (preg_match('/<form[^>]+class="[^"]*pkp_form[^"]*login[^"]*"[^>]*>/i', $output) || strpos($output, 'name="loginPassword"') !== false || strpos($output, 'id="password"') !== false) {
+			if (preg_match('/(<div class="buttons">.*?<\/div>\s*<\/fieldset>)/s', $output, $m)) {
+				return str_replace($m[1], $m[1] . $noticeHtml, $output);
+			}
+		}
+		return $output;
 	}
 
 	/**

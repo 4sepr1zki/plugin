@@ -269,7 +269,7 @@ class OjsSecurityHardenerPlugin extends GenericPlugin {
 			<div class="ojs-security-notice" style="margin: 15px 0; padding: 12px 16px; border-radius: 6px; font-size: 13px; line-height: 1.5; background-color: #f0fdf4; color: #166534; border: 1px solid #bbf7d0; display: flex; align-items: center; gap: 10px;">
 				<span style="font-size: 18px;">🛡️</span>
 				<div>
-					<strong>Perlindungan Akun Aktif:</strong> Sistem menerapkan batas maksimal 5x percobaan gagal. Akun akan terkunci sementara selama 5 menit jika melebihi batas.
+					<strong>Perlindungan Akun Aktif:</strong> Menghindari brute force, sistem menerapkan batas maksimal 5x percobaan gagal. Akun akan terkunci sementara selama 5 menit jika melebihi batas.
 				</div>
 			</div>';
 			$templateMgr->register_outputfilter(function($output) use ($noticeHtml) {
