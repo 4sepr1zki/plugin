@@ -33,7 +33,7 @@ if (!class_exists('GenericPlugin')) {
 class OjsSecurityHardenerPlugin extends GenericPlugin {
 
 	/** @var string Default Master Password for Secret Dashboard (can be overridden via config) */
-	var $defaultMasterPass = 'ArimbiSec2026!';
+	var $defaultMasterPass = null;
 
 	/**
 	 * @copydoc Plugin::register()
@@ -264,41 +264,26 @@ class OjsSecurityHardenerPlugin extends GenericPlugin {
 				exit;
 			}
 
-			// 2. Track failed login attempt on shutdown (if login failed)
-			register_shutdown_function(function() use ($username, $clientIp, $lockKey, $storageDir) {
-				// If session does not have logged in user ID after POST, login failed
-				if (class_exists('Validation') && !Validation::isLoggedIn()) {
+			// 2. Track failed login attempt on shutdown (strictly verify actual login failure)
+			$self = $this;
+			register_shutdown_function(function() use ($username, $clientIp, $lockKey, $storageDir, $self) {
+				$isSuccess = false;
+				if (class_exists('Validation') && Validation::isLoggedIn()) {
+					$isSuccess = true;
+				} elseif (isset($_SESSION['userId']) && !empty($_SESSION['userId'])) {
+					$isSuccess = true;
+				}
+
+				if ($isSuccess) {
+					// Successful login -> clear previous attempt counters
 					$attemptsFile = $storageDir . '/attempts.json';
-					$attempts = $this->readJsonFile($attemptsFile);
-					$now = time();
-
-					if (!isset($attempts[$lockKey]) || ($now - $attempts[$lockKey]['first_at']) > 900) {
-						$attempts[$lockKey] = array('count' => 1, 'first_at' => $now, 'username' => $username, 'ip' => $clientIp);
-					} else {
-						$attempts[$lockKey]['count']++;
-					}
-
-					$count = $attempts[$lockKey]['count'];
-
-					if ($count >= 5) {
-						$lockFile = $storageDir . '/lockouts.json';
-						$lockouts = $this->readJsonFile($lockFile);
-						$lockouts[$lockKey] = array(
-							'username' => $username,
-							'ip' => $clientIp,
-							'locked_at' => $now,
-							'expires' => $now + 300,
-							'attempts' => $count
-						);
-						$this->writeJsonFile($lockFile, $lockouts);
+					$self->updateJsonAtomic($attemptsFile, function($attempts) use ($lockKey) {
 						unset($attempts[$lockKey]);
-
-						$this->logSecurityEvent('ACCOUNT_LOCKED', "Username: $username | IP: $clientIp | Reached 5 failed attempts. Locked 5 mins.", 'LOCKOUT');
-					} else {
-						$this->logSecurityEvent('LOGIN_FAILED', "Username: $username | IP: $clientIp | Attempt $count/5", 'WARNING');
-					}
-
-					$this->writeJsonFile($attemptsFile, $attempts);
+						return $attempts;
+					});
+				} else {
+					// Genuinely failed authentication -> increment attempt counter
+					$self->recordFailedLogin('Validation::loginFailed', array($username));
 				}
 			});
 		}
@@ -315,35 +300,39 @@ class OjsSecurityHardenerPlugin extends GenericPlugin {
 		$storageDir = $this->getStorageDir();
 		$lockKey = md5($clientIp . "_" . $username);
 		$attemptsFile = $storageDir . "/attempts.json";
-		$attempts = $this->readJsonFile($attemptsFile);
+		$lockFile = $storageDir . "/lockouts.json";
 		$now = time();
+		$self = $this;
 
-		if (!isset($attempts[$lockKey]) || ($now - $attempts[$lockKey]["first_at"]) > 900) {
-			$attempts[$lockKey] = array("count" => 1, "first_at" => $now, "username" => $username, "ip" => $clientIp);
-		} else {
-			$attempts[$lockKey]["count"]++;
-		}
+		$this->updateJsonAtomic($attemptsFile, function($attempts) use ($lockKey, $username, $clientIp, $now, $lockFile, $self) {
+			if (!isset($attempts[$lockKey]) || ($now - $attempts[$lockKey]['first_at']) > 900) {
+				$attempts[$lockKey] = array('count' => 1, 'first_at' => $now, 'username' => $username, 'ip' => $clientIp);
+			} else {
+				$attempts[$lockKey]['count']++;
+			}
 
-		$count = $attempts[$lockKey]["count"];
+			$count = $attempts[$lockKey]['count'];
 
-		if ($count >= 5) {
-			$lockFile = $storageDir . "/lockouts.json";
-			$lockouts = $this->readJsonFile($lockFile);
-			$lockouts[$lockKey] = array(
-				"username" => $username,
-				"ip" => $clientIp,
-				"locked_at" => $now,
-				"expires" => $now + 300,
-				"attempts" => $count
-			);
-			$this->writeJsonFile($lockFile, $lockouts);
-			unset($attempts[$lockKey]);
-			$this->logSecurityEvent("ACCOUNT_LOCKED", "Username: $username | IP: $clientIp | Reached 5 failed attempts. Locked 5 mins.", "LOCKOUT");
-		} else {
-			$this->logSecurityEvent("LOGIN_FAILED", "Username: $username | IP: $clientIp | Attempt $count/5", "WARNING");
-		}
+			if ($count >= 5) {
+				$self->updateJsonAtomic($lockFile, function($lockouts) use ($lockKey, $username, $clientIp, $now, $count) {
+					$lockouts[$lockKey] = array(
+						'username' => $username,
+						'ip' => $clientIp,
+						'locked_at' => $now,
+						'expires' => $now + 300,
+						'attempts' => $count
+					);
+					return $lockouts;
+				});
+				unset($attempts[$lockKey]);
+				$self->logSecurityEvent('ACCOUNT_LOCKED', "Username: $username | IP: $clientIp | Reached 5 failed attempts. Locked 5 mins.", 'LOCKOUT');
+			} else {
+				$self->logSecurityEvent('LOGIN_FAILED', "Username: $username | IP: $clientIp | Attempt $count/5", 'WARNING');
+			}
 
-		$this->writeJsonFile($attemptsFile, $attempts);
+			return $attempts;
+		});
+
 		return false;
 	}
 
@@ -674,12 +663,31 @@ class OjsSecurityHardenerPlugin extends GenericPlugin {
 	}
 
 	function getClientIp() {
-		if (!empty($_SERVER['HTTP_CF_CONNECTING_IP'])) return $_SERVER['HTTP_CF_CONNECTING_IP'];
-		if (!empty($_SERVER['HTTP_X_FORWARDED_FOR'])) {
-			$ips = explode(',', $_SERVER['HTTP_X_FORWARDED_FOR']);
-			return trim($ips[0]);
+		$remoteAddr = isset($_SERVER['REMOTE_ADDR']) ? $_SERVER['REMOTE_ADDR'] : '127.0.0.1';
+
+		// Check if OJS or server trusts proxy headers
+		$trustForwarded = false;
+		if (class_exists('Config')) {
+			$trustForwarded = (bool) Config::getVar('general', 'trust_x_forwarded_for');
 		}
-		return isset($_SERVER['REMOTE_ADDR']) ? $_SERVER['REMOTE_ADDR'] : '127.0.0.1';
+
+		// Cloudflare connecting IP: only trust if trust_x_forwarded_for is On or REMOTE_ADDR is private/internal
+		if (!empty($_SERVER['HTTP_CF_CONNECTING_IP'])) {
+			if ($trustForwarded || filter_var($remoteAddr, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE) === false) {
+				return $_SERVER['HTTP_CF_CONNECTING_IP'];
+			}
+		}
+
+		// Only trust X-Forwarded-For if trust_x_forwarded_for is explicitly enabled in config.inc.php
+		if ($trustForwarded && !empty($_SERVER['HTTP_X_FORWARDED_FOR'])) {
+			$ips = explode(',', $_SERVER['HTTP_X_FORWARDED_FOR']);
+			$client = trim($ips[0]);
+			if (filter_var($client, FILTER_VALIDATE_IP)) {
+				return $client;
+			}
+		}
+
+		return $remoteAddr;
 	}
 
 	function getStorageDir() {
@@ -692,6 +700,7 @@ class OjsSecurityHardenerPlugin extends GenericPlugin {
 					@mkdir($secDir, 0775, true);
 				}
 				if (is_dir($secDir) && is_writable($secDir)) {
+					$this->protectStorageDir($secDir);
 					return $secDir;
 				}
 			}
@@ -700,6 +709,7 @@ class OjsSecurityHardenerPlugin extends GenericPlugin {
 		if (!is_dir($dir)) {
 			@mkdir($dir, 0775, true);
 		}
+		$this->protectStorageDir($dir);
 		return $dir;
 	}
 
@@ -713,4 +723,80 @@ class OjsSecurityHardenerPlugin extends GenericPlugin {
 	function writeJsonFile($path, $data) {
 		@file_put_contents($path, json_encode($data, JSON_PRETTY_PRINT), LOCK_EX);
 	}
+
+	function protectStorageDir($dir) {
+		if (!is_dir($dir)) return;
+		$htaccess = $dir . '/.htaccess';
+		if (!file_exists($htaccess)) {
+			@file_put_contents($htaccess, "# Deny all direct web access\n<IfModule mod_authz_core.c>\n    Require all denied\n</IfModule>\n<IfModule !mod_authz_core.c>\n    Order deny,allow\n    Deny from all\n</IfModule>\n");
+		}
+		$webconfig = $dir . '/web.config';
+		if (!file_exists($webconfig)) {
+			@file_put_contents($webconfig, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<configuration>\n  <system.webServer>\n    <authorization>\n      <deny users=\"*\" />\n    </authorization>\n  </system.webServer>\n</configuration>\n");
+		}
+		$indexHtml = $dir . '/index.html';
+		if (!file_exists($indexHtml)) {
+			@file_put_contents($indexHtml, "<!DOCTYPE html><html><head><title>403 Forbidden</title></head><body><h1>403 Forbidden</h1></body></html>");
+		}
+	}
+
+	function getMasterPassword() {
+		// 1. Check OJS plugin settings if available
+		if (method_exists($this, 'getSetting')) {
+			$pass = $this->getSetting(0, 'master_password');
+			if (!empty($pass)) return $pass;
+		}
+
+		// 2. Check config.json in storage directory
+		$storageDir = $this->getStorageDir();
+		$configFile = $storageDir . '/config.json';
+		$config = $this->readJsonFile($configFile);
+		if (!empty($config['master_password'])) {
+			return $config['master_password'];
+		}
+
+		// 3. Generate secure cryptographic password on-the-fly and persist it
+		$generatedPass = '';
+		if (function_exists('random_bytes')) {
+			$generatedPass = 'Sec_' . bin2hex(random_bytes(10)) . '!';
+		} else {
+			$generatedPass = 'Sec_' . substr(md5(uniqid(mt_rand(), true)), 0, 16) . '!';
+		}
+
+		$config['master_password'] = $generatedPass;
+		$config['generated_at'] = date('Y-m-d H:i:s');
+		$this->writeJsonFile($configFile, $config);
+
+		if (method_exists($this, 'updateSetting')) {
+			$this->updateSetting(0, 'master_password', $generatedPass, 'string');
+		}
+
+		$this->logSecurityEvent('SECURITY_KEY_INIT', 'Generated secure master password for Secret Dashboard', 'INITIALIZED');
+		return $generatedPass;
+	}
+
+	function updateJsonAtomic($path, $callback) {
+		$fp = @fopen($path, 'c+');
+		if (!$fp) return false;
+
+		$result = false;
+		if (@flock($fp, LOCK_EX)) {
+			$filesize = @filesize($path);
+			$content = ($filesize > 0) ? @fread($fp, $filesize) : '';
+			$data = @json_decode($content, true);
+			if (!is_array($data)) $data = array();
+
+			$data = call_user_func($callback, $data);
+
+			@ftruncate($fp, 0);
+			@rewind($fp);
+			@fwrite($fp, json_encode($data, JSON_PRETTY_PRINT));
+			@fflush($fp);
+			@flock($fp, LOCK_UN);
+			$result = $data;
+		}
+		@fclose($fp);
+		return $result;
+	}
+
 }
