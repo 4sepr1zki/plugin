@@ -243,10 +243,8 @@ class OjsSecurityHardenerPlugin extends GenericPlugin {
 		</head>
 		<body>
 			<div class="card">
-				<h2>⚠️ Akun Ditangguhkan Sementara</h2>
-				<p>Terlalu banyak percobaan password salah pada akun <strong><?php echo htmlspecialchars($username); ?></strong>.</p>
-				<div class="timer">Tunggu: <?php echo intval($remaining); ?> Menit</div>
-				<p>Untuk membuka kunci akun ini secara instan, silakan hubungi Administrator atau buka kunci melalui Security Dashboard.</p>
+				<h2>⚠️ Akses Dibatasi</h2>
+				<p style="font-size:16px; margin: 20px 0; color:#f1f5f9;">Terlalu banyak percobaan salah, tunggu <?php echo intval($remaining); ?> menit untuk mencoba kembali.</p>
 				<a href="javascript:history.back()">« Kembali ke Halaman Login</a>
 			</div>
 		</body>
