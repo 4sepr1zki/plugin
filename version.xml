@@ -11,8 +11,8 @@
 <version>
 	<application>ojsSecurityHardener</application>
 	<type>plugins.generic</type>
-	<release>1.0.0.0</release>
-	<date>2026-10-14</date>
+	<release>1.0.1.0</release>
+	<date>2026-10-21</date>
 	<class>OjsSecurityHardenerPlugin</class>
 	<sitewide>1</sitewide>
 </version>
