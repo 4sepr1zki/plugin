@@ -505,13 +505,18 @@ class OjsSecurityHardenerPlugin extends GenericPlugin {
 		if (strpos($output, 'ojs-security-notice') !== false) {
 			return $output;
 		}
-		$noticeHtml = '<div class="ojs-security-notice" style="margin: 15px 0; padding: 12px 16px; border-radius: 6px; font-size: 13px; line-height: 1.5; background-color: #f0fdf4; color: #166534; border: 1px solid #bbf7d0; display: flex; align-items: center; gap: 10px;"><span style="font-size: 18px;">🛡️</span><div><strong>Perlindungan Akun Aktif:</strong> Menghindari brute force, sistem menerapkan batas maksimal 5x percobaan gagal.</div></div>';
-		$target = 'id="login"';
-		$pos = strpos($output, $target);
-		if ($pos !== false) {
-			$closePos = strpos($output, '</form>', $pos);
-			if ($closePos !== false) {
-				return substr_replace($output, $noticeHtml . '</form>', $closePos, strlen('</form>'));
+		$noticeHtml = '<div class="ojs-security-notice" style="margin: 18px 0; padding: 12px 16px; border-radius: 6px; font-size: 13px; line-height: 1.5; background-color: #f0fdf4; color: #166534; border: 1px solid #bbf7d0; display: flex; align-items: center; gap: 10px;"><span style="font-size: 18px;">🛡️</span><div><strong>Perlindungan Akun Aktif:</strong> Menghindari brute force, sistem menerapkan batas maksimal 5x percobaan gagal.</div></div>';
+		// Taruh di tengah: tepat di antara judul/keterangan halaman dan form login input
+		$target = '<form class="cmp_form cmp_form login"';
+		if (strpos($output, $target) !== false) {
+			return str_replace($target, $noticeHtml . "
+	" . $target, $output);
+		}
+		if (strpos($output, 'id="login"') !== false) {
+			$pos = strpos($output, '<form');
+			if ($pos !== false) {
+				return substr_replace($output, $noticeHtml . "
+	<form", $pos, strlen('<form'));
 			}
 		}
 		if (strpos($output, '</form>') !== false) {
