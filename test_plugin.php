@@ -46,12 +46,29 @@ echo "[PASS] Test 4: Anti Brute-force Hybrid Lockout triggered at 5 attempts!\n"
 // Test 5: Dedicated Logger
 $logFile = $plugin->getStorageDir() . '/security_audit.log';
 assert(file_exists($logFile));
-echo "[PASS] Test 5: Dedicated security audit log recorded successfully!\n";
+$logRaw = file_get_contents($logFile);
+assert(strpos($logRaw, "<?php http_response_code(403);") === 0);
+echo "[PASS] Test 5: Dedicated security audit log protected with PHP exit header!\n";
 
 // Test 6: Dynamic Master Password Generation
 $masterPass = $plugin->getMasterPassword();
 assert(!empty($masterPass) && strpos($masterPass, 'Sec_') === 0);
-echo "[PASS] Test 6: Dynamic Master Password generated securely without hardcoded defaults!\n";
+
+// Test 7: Verify Storage Direct Access Denial (Nginx immunity)
+$configFile = $plugin->getStorageDir() . '/config.json';
+assert(file_exists($configFile));
+$configRaw = file_get_contents($configFile);
+assert(strpos($configRaw, "<?php http_response_code(403);") === 0);
+assert(file_exists($plugin->getStorageDir() . '/index.php'));
+echo "[PASS] Test 7: Storage files immunity for Nginx & Apache confirmed!\n";
+
+// Test 8: Dashboard XSS escaping helper
+$dangerousXss = "<script>alert('xss')</script>\"&'";
+$escaped = $plugin->esc($dangerousXss);
+assert(strpos($escaped, "<script>") === false);
+assert(strpos($escaped, "&quot;") !== false);
+assert(strpos($escaped, "&#039;") !== false);
+echo "[PASS] Test 8: Strict HTML/XSS escaping with ENT_QUOTES | ENT_SUBSTITUTE verified!\n";
 
 // Clean up test data
 @unlink($lockFile);
@@ -59,9 +76,10 @@ echo "[PASS] Test 6: Dynamic Master Password generated securely without hardcode
 @unlink($plugin->getStorageDir() . '/config.json');
 @unlink($plugin->getStorageDir() . '/dashboard_attempts.json');
 @unlink($logFile);
+@unlink($plugin->getStorageDir() . '/index.php');
 @unlink($plugin->getStorageDir() . '/.htaccess');
 @unlink($plugin->getStorageDir() . '/web.config');
 @unlink($plugin->getStorageDir() . '/index.html');
 @rmdir($plugin->getStorageDir());
 
-echo "\n>>> ALL 6 ENTERPRISE SECURITY TESTS PASSED 100% <<<\n";
+echo "\n>>> ALL 8 ENTERPRISE SECURITY TESTS PASSED 100% <<<\n";

@@ -654,6 +654,10 @@ class OjsSecurityHardenerPlugin extends GenericPlugin {
 		exit;
 	}
 
+	function esc($string) {
+		return htmlspecialchars((string)$string, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+	}
+
 	function renderDashboardLogin($error = '', $disabled = false) {
 		header('Content-Type: text/html; charset=UTF-8');
 		?>
@@ -686,7 +690,7 @@ class OjsSecurityHardenerPlugin extends GenericPlugin {
 				<div class="logo"><span>🛡️</span></div>
 				<h2>Security Monitoring Panel</h2>
 				<p class="subtitle">OJS Virtual Patch & Hardening System</p>
-				<?php if (!empty($error)): ?><div class="error"><?php echo htmlspecialchars($error); ?></div><?php endif; ?>
+				<?php if (!empty($error)): ?><div class="error"><?php echo $this->esc($error); ?></div><?php endif; ?>
 				<form method="POST">
 					<div class="form-group">
 						<label for="sec_password">Master Security Key</label>
@@ -711,7 +715,13 @@ class OjsSecurityHardenerPlugin extends GenericPlugin {
 		$recentLogs = array();
 
 		if (file_exists($logFile)) {
-			$lines = array_reverse(array_filter(explode("\n", file_get_contents($logFile))));
+			$rawLines = array_filter(explode("\n", file_get_contents($logFile)));
+			$cleanLines = array();
+			foreach ($rawLines as $rl) {
+				if (strpos($rl, '<?php') !== false) continue;
+				$cleanLines[] = $rl;
+			}
+			$lines = array_reverse($cleanLines);
 			$totalEvents = count($lines);
 			$count = 0;
 			foreach ($lines as $line) {
@@ -816,8 +826,8 @@ class OjsSecurityHardenerPlugin extends GenericPlugin {
 									$remaining = max(0, ceil(($item['expires'] - time()) / 60));
 								?>
 								<tr>
-									<td><strong><?php echo htmlspecialchars($item['username']); ?></strong></td>
-									<td><code><?php echo htmlspecialchars($item['ip']); ?></code></td>
+									<td><strong><?php echo $this->esc($item['username']); ?></strong></td>
+									<td><code><?php echo $this->esc($item['ip']); ?></code></td>
 									<td><?php echo date('H:i:s d/m/Y', $item['locked_at']); ?></td>
 									<td><span style="color:#f87171; font-weight:600;"><?php echo $remaining; ?> Menit</span></td>
 									<td><a href="?sec_dash=1&unlock=<?php echo urlencode($key); ?>&csrf=<?php echo urlencode($csrfToken); ?>" class="btn-unlock" onclick="return confirm('Buka kunci akun ini sekarang?')">🔓 Quick Unlock (Buka Akun)</a></td>
@@ -835,7 +845,7 @@ class OjsSecurityHardenerPlugin extends GenericPlugin {
 							echo "[INFO] Belum ada insiden keamanan yang tercatat. Sistem dalam kondisi aman sentosa.\n";
 						} else {
 							foreach ($recentLogs as $l) {
-								echo htmlspecialchars($l) . "\n";
+								echo $this->esc($l) . "\n";
 							}
 						}
 					?></pre>
@@ -849,6 +859,10 @@ class OjsSecurityHardenerPlugin extends GenericPlugin {
 	function logSecurityEvent($eventType, $details, $status = 'INFO') {
 		$storageDir = $this->getStorageDir();
 		$logFile = $storageDir . '/security_audit.log';
+		if (!file_exists($logFile)) {
+			$header = "<?php http_response_code(403); exit('403 Forbidden'); ?>\n";
+			@file_put_contents($logFile, $header, LOCK_EX);
+		}
 		$ip = $this->getClientIp();
 		$timestamp = date('Y-m-d H:i:s');
 		$entry = sprintf("[%s] [%s] IP: %s | %s | ACTION: %s\n", $timestamp, $eventType, $ip, $details, $status);
@@ -908,16 +922,26 @@ class OjsSecurityHardenerPlugin extends GenericPlugin {
 	function readJsonFile($path) {
 		if (!file_exists($path)) return array();
 		$content = @file_get_contents($path);
+		if ($content === false) return array();
+		if (substr($content, 0, 5) === '<?php') {
+			$firstNewline = strpos($content, "\n");
+			$content = ($firstNewline !== false) ? substr($content, $firstNewline + 1) : '';
+		}
 		$data = @json_decode($content, true);
 		return is_array($data) ? $data : array();
 	}
 
 	function writeJsonFile($path, $data) {
-		@file_put_contents($path, json_encode($data, JSON_PRETTY_PRINT), LOCK_EX);
+		$payload = "<?php http_response_code(403); exit('403 Forbidden'); ?>\n" . json_encode($data, JSON_PRETTY_PRINT);
+		@file_put_contents($path, $payload, LOCK_EX);
 	}
 
 	function protectStorageDir($dir) {
 		if (!is_dir($dir)) return;
+		$indexPhp = $dir . '/index.php';
+		if (!file_exists($indexPhp)) {
+			@file_put_contents($indexPhp, "<?php\nhttp_response_code(403);\nheader('HTTP/1.1 403 Forbidden');\nexit('403 Forbidden');\n");
+		}
 		$htaccess = $dir . '/.htaccess';
 		if (!file_exists($htaccess)) {
 			@file_put_contents($htaccess, "# Deny all direct web access\n<IfModule mod_authz_core.c>\n    Require all denied\n</IfModule>\n<IfModule !mod_authz_core.c>\n    Order deny,allow\n    Deny from all\n</IfModule>\n");
@@ -979,14 +1003,19 @@ class OjsSecurityHardenerPlugin extends GenericPlugin {
 		if (@flock($fp, LOCK_EX)) {
 			$filesize = @filesize($path);
 			$content = ($filesize > 0) ? @fread($fp, $filesize) : '';
+			if (substr($content, 0, 5) === '<?php') {
+				$firstNewline = strpos($content, "\n");
+				$content = ($firstNewline !== false) ? substr($content, $firstNewline + 1) : '';
+			}
 			$data = @json_decode($content, true);
 			if (!is_array($data)) $data = array();
 
 			$data = call_user_func($callback, $data);
 
+			$payload = "<?php http_response_code(403); exit('403 Forbidden'); ?>\n" . json_encode($data, JSON_PRETTY_PRINT);
 			@ftruncate($fp, 0);
 			@rewind($fp);
-			@fwrite($fp, json_encode($data, JSON_PRETTY_PRINT));
+			@fwrite($fp, $payload);
 			@fflush($fp);
 			@flock($fp, LOCK_UN);
 			$result = $data;
