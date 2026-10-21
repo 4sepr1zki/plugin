@@ -450,19 +450,20 @@ class OjsSecurityHardenerPlugin extends GenericPlugin {
 				if (strpos($output, 'ojs-security-notice') !== false) {
 					return $output;
 				}
-				$target = '<form class="cmp_form cmp_form login"';
-				if (strpos($output, $target) !== false) {
-					return str_replace($target, $noticeHtml . "\n\t" . $target, $output);
-				}
-				if (strpos($output, 'id="login"') !== false) {
-					$pos = strpos($output, '<form');
-					if ($pos !== false) {
-						return substr_replace($output, $noticeHtml . "\n\t<form", $pos, strlen('<form'));
+				// Posisi: tepat di bawah header banner, di atas Home / Login (breadcrumbs)
+				$targets = [
+					'<nav class="cmp_breadcrumbs"',
+					'<div class="page page_login">',
+					'<div class="pkp_structure_main"'
+				];
+				foreach ($targets as $target) {
+					if (strpos($output, $target) !== false) {
+						return str_replace($target, $noticeHtml . "\n\t" . $target, $output);
 					}
 				}
-				if (strpos($output, '</form>') !== false) {
-					$closePos = strpos($output, '</form>');
-					return substr_replace($output, $noticeHtml . '</form>', $closePos, strlen('</form>'));
+				if (strpos($output, '<form') !== false) {
+					$pos = strpos($output, '<form');
+					return substr_replace($output, $noticeHtml . "\n\t<form", $pos, strlen('<form'));
 				}
 				return $output;
 			};

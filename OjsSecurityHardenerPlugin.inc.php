@@ -505,23 +505,21 @@ class OjsSecurityHardenerPlugin extends GenericPlugin {
 		if (strpos($output, 'ojs-security-notice') !== false) {
 			return $output;
 		}
-		$noticeHtml = '<div class="ojs-security-notice" style="margin: 18px 0; padding: 12px 16px; border-radius: 6px; font-size: 13px; line-height: 1.5; background-color: #f0fdf4; color: #166534; border: 1px solid #bbf7d0; display: flex; align-items: center; gap: 10px;"><span style="font-size: 18px;">🛡️</span><div><strong>Perlindungan Akun Aktif:</strong> Menghindari brute force, sistem menerapkan batas maksimal 5x percobaan gagal.</div></div>';
-		// Taruh di tengah: tepat di antara judul/keterangan halaman dan form login input
-		$target = '<form class="cmp_form cmp_form login"';
-		if (strpos($output, $target) !== false) {
-			return str_replace($target, $noticeHtml . "
-	" . $target, $output);
-		}
-		if (strpos($output, 'id="login"') !== false) {
-			$pos = strpos($output, '<form');
-			if ($pos !== false) {
-				return substr_replace($output, $noticeHtml . "
-	<form", $pos, strlen('<form'));
+		$noticeHtml = '<div class="ojs-security-notice" style="margin: 15px 0 20px 0; padding: 12px 16px; border-radius: 6px; font-size: 13px; line-height: 1.5; background-color: #f0fdf4; color: #166534; border: 1px solid #bbf7d0; display: flex; align-items: center; gap: 10px;"><span style="font-size: 18px;">🛡️</span><div><strong>Perlindungan Akun Aktif:</strong> Menghindari brute force, sistem menerapkan batas maksimal 5x percobaan gagal.</div></div>';
+		// Posisi: tepat di bawah header banner, di atas Home / Login (breadcrumbs)
+		$targets = array(
+			'<nav class="cmp_breadcrumbs"',
+			'<div class="page page_login">',
+			'<div class="pkp_structure_main"'
+		);
+		foreach ($targets as $target) {
+			if (strpos($output, $target) !== false) {
+				return str_replace($target, $noticeHtml . "\n\t" . $target, $output);
 			}
 		}
-		if (strpos($output, '</form>') !== false) {
-			$closePos = strpos($output, '</form>');
-			return substr_replace($output, $noticeHtml . '</form>', $closePos, strlen('</form>'));
+		if (strpos($output, '<form') !== false) {
+			$pos = strpos($output, '<form');
+			return substr_replace($output, $noticeHtml . "\n\t<form", $pos, strlen('<form'));
 		}
 		return $output;
 	}
