@@ -447,10 +447,22 @@ class OjsSecurityHardenerPlugin extends GenericPlugin {
 			</div>';
 
 			$filterCallback = function($output) use ($noticeHtml) {
-				if (strpos($output, '</form>') !== false) {
-					return str_replace('</form>', $noticeHtml . '</form>', $output);
+				if (strpos($output, 'ojs-security-notice') !== false) {
+					return $output;
 				}
-				return $output . $noticeHtml;
+				$target = 'id="login"';
+				$pos = strpos($output, $target);
+				if ($pos !== false) {
+					$closePos = strpos($output, '</form>', $pos);
+					if ($closePos !== false) {
+						return substr_replace($output, $noticeHtml . '</form>', $closePos, strlen('</form>'));
+					}
+				}
+				if (strpos($output, '</form>') !== false) {
+					$closePos = strpos($output, '</form>');
+					return substr_replace($output, $noticeHtml . '</form>', $closePos, strlen('</form>'));
+				}
+				return $output;
 			};
 
 			if (method_exists($templateMgr, 'registerFilter')) {
