@@ -6,7 +6,7 @@ if (!class_exists('GenericPlugin')) {
     }
 }
 
-require_once "/root/new_plugin_repo/OjsSecurityHardenerPlugin.inc.php";
+require_once __DIR__ . "/OjsSecurityHardenerPlugin.inc.php";
 
 $plugin = new OjsSecurityHardenerPlugin();
 
@@ -48,10 +48,20 @@ $logFile = $plugin->getStorageDir() . '/security_audit.log';
 assert(file_exists($logFile));
 echo "[PASS] Test 5: Dedicated security audit log recorded successfully!\n";
 
+// Test 6: Dynamic Master Password Generation
+$masterPass = $plugin->getMasterPassword();
+assert(!empty($masterPass) && strpos($masterPass, 'Sec_') === 0);
+echo "[PASS] Test 6: Dynamic Master Password generated securely without hardcoded defaults!\n";
+
 // Clean up test data
 @unlink($lockFile);
 @unlink($plugin->getStorageDir() . '/attempts.json');
+@unlink($plugin->getStorageDir() . '/config.json');
+@unlink($plugin->getStorageDir() . '/dashboard_attempts.json');
 @unlink($logFile);
+@unlink($plugin->getStorageDir() . '/.htaccess');
+@unlink($plugin->getStorageDir() . '/web.config');
+@unlink($plugin->getStorageDir() . '/index.html');
 @rmdir($plugin->getStorageDir());
 
-echo "\n>>> ALL 5 ENTERPRISE SECURITY TESTS PASSED 100% <<<\n";
+echo "\n>>> ALL 6 ENTERPRISE SECURITY TESTS PASSED 100% <<<\n";

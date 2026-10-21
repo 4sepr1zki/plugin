@@ -18,27 +18,42 @@ use PKP\plugins\GenericPlugin;
 use PKP\plugins\Hook;
 use PKP\config\Config;
 use PKP\core\PKPApplication;
+use PKP\security\Role;
 
 class OjsSecurityHardenerPlugin extends GenericPlugin {
-
-	public string $defaultMasterPass = 'ArimbiSec2026!';
 
 	public function register($category, $path, $mainContextId = null) {
 		$success = parent::register($category, $path, $mainContextId);
 
-		// Boot-level XXE Hardening
+		// 1. Boot-level XXE Hardening
 		$this->hardenXmlParser();
 
 		if (!Config::getVar('general', 'installed') || defined('RUNNING_UPGRADE')) return true;
 
-		// Intercept Secret Security Dashboard Request
+		// 2. Intercept Secret Security Dashboard Request
 		$this->handleDashboardRequest();
 
 		if ($success && $this->getEnabled($mainContextId)) {
+			// Virtual Patch CVE-2024-7902 (Open Redirect)
 			Hook::add('Request::redirect', [$this, 'sanitizeRedirect']);
+
+			// Virtual Patch CVE-2022-24181 (Host Header XSS & Poisoning)
 			Hook::add('Request::getServerHost', [$this, 'sanitizeServerHost']);
+
+			// Virtual Patch CVE-2026-19906 (API Key CSPRNG)
 			Hook::add('APIProfileForm::execute', [$this, 'hardenApiKeyGeneration']);
+
+			// Anti Brute-Force & Early Lockout Interception
 			Hook::add('Dispatcher::dispatch', [$this, 'interceptLoginAttempts']);
+
+			// Real Virtual Patch CVE-2024-56525 & Uploaded XML XXE Scanner
+			Hook::add('Dispatcher::dispatch', [$this, 'inspectUploadedFiles']);
+
+			// Core Authentication Hooks
+			Hook::add('User::login', [$this, 'handleSuccessfulLogin']);
+			Hook::add('User::loginFailed', [$this, 'handleFailedLoginHook']);
+
+			// UI Notice & Security Headers
 			Hook::add('TemplateManager::display', [$this, 'injectUiAndHeaders']);
 		}
 
@@ -46,23 +61,81 @@ class OjsSecurityHardenerPlugin extends GenericPlugin {
 	}
 
 	public function getDisplayName() {
-		return 'OJS Security Hardener & Monitoring Dashboard';
+		return __('plugins.generic.ojsSecurityHardener.displayName', [], 'OJS Security Hardener & Monitoring Dashboard');
 	}
 
 	public function getDescription() {
-		return 'Enterprise virtual patch suite with Anti Brute-force, Secret Monitoring Dashboard, Dedicated Audit Logger, and CVE mitigations.';
+		return __('plugins.generic.ojsSecurityHardener.description', [], 'Enterprise virtual patch suite with Anti Brute-force, Secret Monitoring Dashboard, Dedicated Audit Logger, and CVE mitigations.');
 	}
 
 	public function isSitePlugin() {
 		return true;
 	}
 
+	/**
+	 * Mitigate legacy XXE: Disable XML external entity loader where applicable.
+	 */
 	public function hardenXmlParser() {
-		if (function_exists('libxml_disable_entity_loader')) {
+		if (PHP_VERSION_ID < 80000 && function_exists('libxml_disable_entity_loader')) {
 			@libxml_disable_entity_loader(true);
 		}
 	}
 
+	/**
+	 * Real Virtual Patch for CVE-2024-56525 (User XML Privilege Escalation) & Generic XXE in uploads.
+	 */
+	public function inspectUploadedFiles($hookName = null, $args = null) {
+		if ($_SERVER['REQUEST_METHOD'] !== 'POST' || empty($_FILES)) {
+			return false;
+		}
+
+		foreach ($_FILES as $file) {
+			$tmpNames = is_array($file['tmp_name']) ? $file['tmp_name'] : [$file['tmp_name']];
+			$names = is_array($file['name']) ? $file['name'] : [$file['name']];
+
+			foreach ($tmpNames as $idx => $path) {
+				if (empty($path) || !is_uploaded_file($path)) continue;
+				$filename = strtolower($names[$idx] ?? '');
+
+				// Only scan XML files
+				if (substr($filename, -4) === '.xml' || substr($filename, -5) === '.xmls') {
+					$content = @file_get_contents($path, false, null, 0, 1024 * 512);
+					if ($content === false) continue;
+
+					// 1. Generic XXE Protection: detect dangerous DTD / external entities
+					if (preg_match('/<!ENTITY\s+[^>]+(SYSTEM|PUBLIC)\s+[\'"]/i', $content)) {
+						$this->logSecurityEvent('XXE_ATTACK', 'Blocked uploaded XML containing external entity declaration: ' . $filename, 'BLOCKED');
+						header('HTTP/1.1 403 Forbidden');
+						header('Content-Type: text/plain; charset=UTF-8');
+						die('Security Alert: Malicious XML External Entity (XXE) detected.');
+					}
+
+					// 2. CVE-2024-56525: User XML Privilege Escalation (Super Admin Role Injection)
+					if (preg_match('/(ROLE_ID_SITE_ADMIN|<role_id\s+type=[\'"]super_admin[\'"]|<user_group_ref[^>]*>Site Administrator<\/user_group_ref>)/i', $content)) {
+						$isSiteAdmin = false;
+						$request = PKPApplication::get()->getRequest();
+						$user = $request ? $request->getUser() : null;
+						if ($user && method_exists($user, 'hasRole')) {
+							$isSiteAdmin = $user->hasRole([Role::ROLE_ID_SITE_ADMIN], 0);
+						}
+
+						if (!$isSiteAdmin) {
+							$this->logSecurityEvent('CVE_2024_56525_BLOCKED', 'Blocked non-site admin attempting to import XML with Site Administrator privileges: ' . $filename, 'CRITICAL');
+							header('HTTP/1.1 403 Forbidden');
+							header('Content-Type: text/plain; charset=UTF-8');
+							die('Security Alert: Privilege escalation detected (CVE-2024-56525). Non-site administrators cannot import users with Site Administrator privileges.');
+						}
+					}
+				}
+			}
+		}
+
+		return false;
+	}
+
+	/**
+	 * Mitigate CVE-2022-24181: Sanitize Server Host and X-Forwarded-Host Header.
+	 */
 	public function sanitizeServerHost($hookName, $args) {
 		$serverHost =& $args[0];
 		if (empty($serverHost) || preg_match('/[^\w\.\-\:]/', $serverHost)) {
@@ -81,6 +154,9 @@ class OjsSecurityHardenerPlugin extends GenericPlugin {
 		return false;
 	}
 
+	/**
+	 * Mitigate CVE-2024-7902: Sanitize URL before sending HTTP Location header.
+	 */
 	public function sanitizeRedirect($hookName, $args) {
 		$url =& $args[0];
 		$url = trim((string) $url);
@@ -151,6 +227,9 @@ class OjsSecurityHardenerPlugin extends GenericPlugin {
 		return false;
 	}
 
+	/**
+	 * Mitigate CVE-2026-19906: Enforce CSPRNG for API Key Generation.
+	 */
 	public function hardenApiKeyGeneration($hookName, $args) {
 		$form =& $args[0];
 		if ($form && method_exists($form, 'getData') && method_exists($form, 'setData')) {
@@ -166,6 +245,49 @@ class OjsSecurityHardenerPlugin extends GenericPlugin {
 		return false;
 	}
 
+	/**
+	 * Reset attempt counter upon successful user login.
+	 */
+	public function handleSuccessfulLogin($hookName, $args) {
+		$clientIp = $this->getClientIp();
+		$user = is_array($args) && isset($args[0]) ? $args[0] : null;
+		$username = '';
+		if ($user && method_exists($user, 'getUsername')) {
+			$username = strtolower(trim($user->getUsername()));
+		} elseif (isset($_POST['username'])) {
+			$username = strtolower(trim((string)$_POST['username']));
+		}
+
+		if (!empty($username)) {
+			$lockKey = md5($clientIp . '_' . $username);
+			$attemptsFile = $this->getStorageDir() . '/attempts.json';
+			$this->updateJsonAtomic($attemptsFile, function($attempts) use ($lockKey) {
+				unset($attempts[$lockKey]);
+				return $attempts;
+			});
+			$this->logSecurityEvent('LOGIN_SUCCESS', "User: $username | IP: $clientIp | Counter reset", 'AUTH');
+		}
+
+		return false;
+	}
+
+	/**
+	 * Direct hook handler for failed login events.
+	 */
+	public function handleFailedLoginHook($hookName, $args) {
+		$username = is_array($args) && isset($args[0]) ? strtolower(trim((string)$args[0])) : '';
+		if (empty($username) && isset($_POST['username'])) {
+			$username = strtolower(trim((string)$_POST['username']));
+		}
+		if (!empty($username)) {
+			$this->recordFailedLogin('User::loginFailed', [$username]);
+		}
+		return false;
+	}
+
+	/**
+	 * Early check for active lockouts on login POST and fallback shutdown verifier.
+	 */
 	public function interceptLoginAttempts($hookName, $args) {
 		if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['username']) && isset($_POST['password'])) {
 			$username = strtolower(trim((string)$_POST['username']));
@@ -177,6 +299,7 @@ class OjsSecurityHardenerPlugin extends GenericPlugin {
 			$lockKey = md5($clientIp . '_' . $username);
 			$now = time();
 
+			// 1. Check if user + IP is actively locked out
 			if (isset($lockouts[$lockKey]) && $lockouts[$lockKey]['expires'] > $now) {
 				$remaining = ceil(($lockouts[$lockKey]['expires'] - $now) / 60);
 				$this->logSecurityEvent('BRUTE_FORCE_BLOCKED', "User: $username | IP: $clientIp | Locked for $remaining more mins", 'REJECTED');
@@ -184,22 +307,73 @@ class OjsSecurityHardenerPlugin extends GenericPlugin {
 				exit;
 			}
 
-			register_shutdown_function(function() use ($username, $clientIp, $lockKey, $storageDir) {
-				$attemptsFile = $storageDir . '/attempts.json';
-				$attempts = $this->readJsonFile($attemptsFile);
-				$now = time();
-
-				if (!isset($attempts[$lockKey]) || ($now - $attempts[$lockKey]['first_at']) > 900) {
-					$attempts[$lockKey] = ['count' => 1, 'first_at' => $now, 'username' => $username, 'ip' => $clientIp];
-				} else {
-					$attempts[$lockKey]['count']++;
+			// 2. Fallback tracking on shutdown: ONLY increment if authentication actually failed!
+			$self = $this;
+			register_shutdown_function(function() use ($username, $clientIp, $lockKey, $storageDir, $self) {
+				// Prevent double-counting if User::loginFailed already handled it
+				if (!empty($GLOBALS['ojs_sec_failed_' . $lockKey])) {
+					return;
 				}
 
-				$count = $attempts[$lockKey]['count'];
+				$isLoggedIn = false;
+				$request = PKPApplication::get()->getRequest();
+				if ($request && $request->getUser()) {
+					$isLoggedIn = true;
+				}
+				if (!$isLoggedIn && class_exists('\\PKP\\session\\SessionManager')) {
+					$sessionMgr = \PKP\session\SessionManager::getManager();
+					$session = $sessionMgr ? $sessionMgr->getUserSession() : null;
+					if ($session && $session->getUserId()) {
+						$isLoggedIn = true;
+					}
+				}
+				if (!$isLoggedIn && !empty($_SESSION['userId'])) {
+					$isLoggedIn = true;
+				}
 
-				if ($count >= 5) {
-					$lockFile = $storageDir . '/lockouts.json';
-					$lockouts = $this->readJsonFile($lockFile);
+				if ($isLoggedIn) {
+					// User successfully logged in: reset counter
+					$attemptsFile = $storageDir . '/attempts.json';
+					$self->updateJsonAtomic($attemptsFile, function($attempts) use ($lockKey) {
+						unset($attempts[$lockKey]);
+						return $attempts;
+					});
+				} else {
+					// Genuine authentication failure
+					$self->recordFailedLogin('Validation::loginFailed', [$username]);
+				}
+			});
+		}
+
+		return false;
+	}
+
+	/**
+	 * Atomically record a failed login attempt and apply lockout when threshold is reached.
+	 */
+	public function recordFailedLogin($hookName, $args) {
+		$username = is_array($args) && isset($args[0]) ? strtolower(trim((string)$args[0])) : 'unknown';
+		$clientIp = $this->getClientIp();
+		$storageDir = $this->getStorageDir();
+		$lockKey = md5($clientIp . '_' . $username);
+		$GLOBALS['ojs_sec_failed_' . $lockKey] = true;
+
+		$attemptsFile = $storageDir . '/attempts.json';
+		$lockFile = $storageDir . '/lockouts.json';
+		$now = time();
+		$self = $this;
+
+		$this->updateJsonAtomic($attemptsFile, function($attempts) use ($lockKey, $username, $clientIp, $now, $lockFile, $self) {
+			if (!isset($attempts[$lockKey]) || ($now - $attempts[$lockKey]['first_at']) > 900) {
+				$attempts[$lockKey] = ['count' => 1, 'first_at' => $now, 'username' => $username, 'ip' => $clientIp];
+			} else {
+				$attempts[$lockKey]['count']++;
+			}
+
+			$count = $attempts[$lockKey]['count'];
+
+			if ($count >= 5) {
+				$self->updateJsonAtomic($lockFile, function($lockouts) use ($lockKey, $username, $clientIp, $now, $count) {
 					$lockouts[$lockKey] = [
 						'username' => $username,
 						'ip' => $clientIp,
@@ -207,17 +381,16 @@ class OjsSecurityHardenerPlugin extends GenericPlugin {
 						'expires' => $now + 300,
 						'attempts' => $count
 					];
-					$this->writeJsonFile($lockFile, $lockouts);
-					unset($attempts[$lockKey]);
+					return $lockouts;
+				});
+				unset($attempts[$lockKey]);
+				$self->logSecurityEvent('ACCOUNT_LOCKED', "Username: $username | IP: $clientIp | Reached 5 failed attempts. Locked 5 mins.", 'LOCKOUT');
+			} else {
+				$self->logSecurityEvent('LOGIN_FAILED', "Username: $username | IP: $clientIp | Attempt $count/5", 'WARNING');
+			}
 
-					$this->logSecurityEvent('ACCOUNT_LOCKED', "Username: $username | IP: $clientIp | Reached 5 failed attempts. Locked 5 mins.", 'LOCKOUT');
-				} else {
-					$this->logSecurityEvent('LOGIN_FAILED', "Username: $username | IP: $clientIp | Attempt $count/5", 'WARNING');
-				}
-
-				$this->writeJsonFile($attemptsFile, $attempts);
-			});
-		}
+			return $attempts;
+		});
 
 		return false;
 	}
@@ -236,7 +409,6 @@ class OjsSecurityHardenerPlugin extends GenericPlugin {
 				.card { background: #1e293b; padding: 36px; border-radius: 12px; box-shadow: 0 10px 25px -5px rgba(0,0,0,0.5); max-width: 480px; text-align: center; border: 1px solid #334155; }
 				h2 { color: #f87171; margin-top: 0; font-size: 22px; display: flex; align-items: center; justify-content: center; gap: 8px; }
 				p { color: #cbd5e1; line-height: 1.6; margin: 16px 0; font-size: 14px; }
-				.timer { background: #0f172a; padding: 8px 16px; border-radius: 6px; display: inline-block; font-weight: 700; color: #38bdf8; border: 1px solid #334155; }
 				a { color: #38bdf8; text-decoration: none; font-weight: 600; display: inline-block; margin-top: 14px; }
 				a:hover { text-decoration: underline; }
 			</style>
@@ -252,6 +424,9 @@ class OjsSecurityHardenerPlugin extends GenericPlugin {
 		<?php
 	}
 
+	/**
+	 * Inject security headers and login notice banner.
+	 */
 	public function injectUiAndHeaders($hookName, $args) {
 		$templateMgr =& $args[0];
 		$template = $args[1] ?? '';
@@ -270,70 +445,149 @@ class OjsSecurityHardenerPlugin extends GenericPlugin {
 					<strong>Perlindungan Akun Aktif:</strong> Menghindari brute force, sistem menerapkan batas maksimal 5x percobaan gagal.
 				</div>
 			</div>';
-			$templateMgr->register_outputfilter(function($output) use ($noticeHtml) {
+
+			$filterCallback = function($output) use ($noticeHtml) {
 				if (strpos($output, '</form>') !== false) {
 					return str_replace('</form>', $noticeHtml . '</form>', $output);
 				}
 				return $output . $noticeHtml;
-			});
+			};
+
+			if (method_exists($templateMgr, 'registerFilter')) {
+				$templateMgr->registerFilter('output', $filterCallback);
+			} elseif (method_exists($templateMgr, 'register_outputfilter')) {
+				$templateMgr->register_outputfilter($filterCallback);
+			}
 		}
 
 		return false;
 	}
 
+	/**
+	 * Handle Secret Monitoring Dashboard Request (?sec_dash=1 or ?sec_admin=1).
+	 */
 	public function handleDashboardRequest() {
 		if (!isset($_GET['sec_dash']) && !isset($_GET['sec_admin'])) {
 			return;
 		}
 
-		@session_start();
+		if (session_status() === PHP_SESSION_NONE) {
+			@session_start();
+		}
+
 		$storageDir = $this->getStorageDir();
+		$masterPass = $this->getMasterPassword();
 		$configFile = $storageDir . '/config.json';
 		$config = $this->readJsonFile($configFile);
-		$masterPass = !empty($config['master_password']) ? $config['master_password'] : $this->defaultMasterPass;
 
+		// CSRF Token generation
+		if (empty($_SESSION['ojs_sec_csrf'])) {
+			$_SESSION['ojs_sec_csrf'] = bin2hex(random_bytes(16));
+		}
+		$csrfToken = $_SESSION['ojs_sec_csrf'];
+
+		// Handle Logout
 		if (isset($_GET['logout'])) {
 			unset($_SESSION['ojs_sec_auth']);
 			header('Location: ?sec_dash=1');
 			exit;
 		}
 
+		// Handle Unlock Action (Protected by CSRF)
 		if (isset($_GET['unlock']) && !empty($_SESSION['ojs_sec_auth'])) {
-			$unlockKey = $_GET['unlock'];
-			$lockFile = $storageDir . '/lockouts.json';
-			$lockouts = $this->readJsonFile($lockFile);
-			if (isset($lockouts[$unlockKey])) {
-				$unlockedUser = $lockouts[$unlockKey]['username'];
-				unset($lockouts[$unlockKey]);
-				$this->writeJsonFile($lockFile, $lockouts);
-				$this->logSecurityEvent('MANUAL_UNLOCK', "Unlocked account: $unlockedUser from Dashboard", 'SUCCESS');
+			$unlockKey = (string)$_GET['unlock'];
+			$token = (string)($_GET['csrf'] ?? '');
+			if (!hash_equals($csrfToken, $token)) {
+				header('HTTP/1.1 403 Forbidden');
+				die('Security Error: Invalid CSRF Token');
 			}
+
+			$lockFile = $storageDir . '/lockouts.json';
+			$this->updateJsonAtomic($lockFile, function($lockouts) use ($unlockKey, $storageDir) {
+				if (isset($lockouts[$unlockKey])) {
+					$unlockedUser = $lockouts[$unlockKey]['username'];
+					unset($lockouts[$unlockKey]);
+					$this->logSecurityEvent('MANUAL_UNLOCK', "Unlocked account: $unlockedUser from Dashboard", 'SUCCESS');
+				}
+				return $lockouts;
+			});
+
 			header('Location: ?sec_dash=1');
 			exit;
 		}
 
+		// Dashboard Rate Limiting Check
+		$clientIp = $this->getClientIp();
+		$dashKey = md5($clientIp . '_dash');
+		$dashAttemptsFile = $storageDir . '/dashboard_attempts.json';
+		$dashAttempts = $this->readJsonFile($dashAttemptsFile);
+		$now = time();
+
+		$isDashLocked = false;
+		$remainingLock = 0;
+		if (isset($dashAttempts[$dashKey]) && $dashAttempts[$dashKey]['count'] >= 5) {
+			$elapsed = $now - $dashAttempts[$dashKey]['last_at'];
+			if ($elapsed < 600) {
+				$isDashLocked = true;
+				$remainingLock = ceil((600 - $elapsed) / 60);
+			} else {
+				// Expired: reset attempts
+				unset($dashAttempts[$dashKey]);
+				$this->writeJsonFile($dashAttemptsFile, $dashAttempts);
+			}
+		}
+
 		$loginError = '';
-		if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['sec_password'])) {
-			if ($_POST['sec_password'] === $masterPass) {
+		if ($isDashLocked) {
+			$loginError = "Terlalu banyak percobaan salah. Akses dashboard dikunci selama {$remainingLock} menit.";
+		} elseif ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['sec_password'])) {
+			$entered = (string)$_POST['sec_password'];
+			$isValid = false;
+
+			if (!empty($config['master_password_hash'])) {
+				$isValid = password_verify($entered, $config['master_password_hash']);
+			}
+			if (!$isValid && !empty($masterPass)) {
+				$isValid = hash_equals($masterPass, $entered);
+			}
+
+			if ($isValid) {
+				// Reset dashboard failed attempts
+				$this->updateJsonAtomic($dashAttemptsFile, function($attempts) use ($dashKey) {
+					unset($attempts[$dashKey]);
+					return $attempts;
+				});
+				session_regenerate_id(true);
 				$_SESSION['ojs_sec_auth'] = true;
 				header('Location: ?sec_dash=1');
 				exit;
 			} else {
+				// Increment dashboard failed attempts
+				$this->updateJsonAtomic($dashAttemptsFile, function($attempts) use ($dashKey, $now) {
+					if (!isset($attempts[$dashKey]) || ($now - $attempts[$dashKey]['last_at']) > 600) {
+						$attempts[$dashKey] = ['count' => 1, 'last_at' => $now];
+					} else {
+						$attempts[$dashKey]['count']++;
+						$attempts[$dashKey]['last_at'] = $now;
+					}
+					return $attempts;
+				});
+
 				$loginError = 'Password keamanan salah. Akses ditolak!';
 				$this->logSecurityEvent('DASHBOARD_LOGIN_FAILED', 'Failed login attempt on Secret Dashboard', 'FAILED');
 			}
 		}
 
 		if (empty($_SESSION['ojs_sec_auth'])) {
-			$this->renderDashboardLogin($loginError);
+			$this->renderDashboardLogin($loginError, $isDashLocked);
 			exit;
 		}
 
-		$this->renderDashboardView($storageDir);
+		$this->renderDashboardView($storageDir, $csrfToken);
 		exit;
 	}
 
-	public function renderDashboardLogin($error = '') {
+	public function renderDashboardLogin($error = '', $disabled = false) {
 		header('Content-Type: text/html; charset=UTF-8');
 		?>
 		<!DOCTYPE html>
@@ -356,6 +610,7 @@ class OjsSecurityHardenerPlugin extends GenericPlugin {
 				input[type="password"]:focus { border-color: #38bdf8; box-shadow: 0 0 0 2px rgba(56,189,248,0.2); }
 				button { width: 100%; padding: 12px; background: #2563eb; color: #fff; border: none; border-radius: 6px; font-weight: 600; cursor: pointer; font-size: 14px; }
 				button:hover { background: #1d4ed8; }
+				button:disabled { background: #475569; cursor: not-allowed; }
 				.error { background: #450a0a; color: #f87171; border: 1px solid #991b1b; padding: 10px 14px; border-radius: 6px; font-size: 13px; margin-bottom: 18px; }
 			</style>
 		</head>
@@ -368,9 +623,9 @@ class OjsSecurityHardenerPlugin extends GenericPlugin {
 				<form method="POST">
 					<div class="form-group">
 						<label for="sec_password">Master Security Key</label>
-						<input type="password" id="sec_password" name="sec_password" placeholder="Masukkan Security Password..." required autofocus>
+						<input type="password" id="sec_password" name="sec_password" placeholder="Masukkan Security Password..." required <?php echo $disabled ? 'disabled' : 'autofocus'; ?>>
 					</div>
-					<button type="submit">Buka Dashboard</button>
+					<button type="submit" <?php echo $disabled ? 'disabled' : ''; ?>>Buka Dashboard</button>
 				</form>
 			</div>
 		</body>
@@ -378,7 +633,7 @@ class OjsSecurityHardenerPlugin extends GenericPlugin {
 		<?php
 	}
 
-	public function renderDashboardView($storageDir) {
+	public function renderDashboardView($storageDir, $csrfToken) {
 		$lockFile = $storageDir . '/lockouts.json';
 		$lockouts = $this->readJsonFile($lockFile);
 		$logFile = $storageDir . '/security_audit.log';
@@ -448,7 +703,7 @@ class OjsSecurityHardenerPlugin extends GenericPlugin {
 
 				<div class="badges">
 					<span style="color:#94a3b8; font-size:12px; margin-right:4px;">Virtual Patches Active:</span>
-					<span class="badge">✓ CVE-2024-56525 (XXE SuperAdmin)</span>
+					<span class="badge">✓ CVE-2024-56525 (User XML SuperAdmin Block)</span>
 					<span class="badge">✓ CVE-2024-7902 (Open Redirect)</span>
 					<span class="badge">✓ CVE-2022-24181 (Host Header XSS)</span>
 					<span class="badge">✓ CVE-2026-19906 (API Token CSPRNG)</span>
@@ -498,7 +753,7 @@ class OjsSecurityHardenerPlugin extends GenericPlugin {
 									<td><code><?php echo htmlspecialchars($item['ip']); ?></code></td>
 									<td><?php echo date('H:i:s d/m/Y', $item['locked_at']); ?></td>
 									<td><span style="color:#f87171; font-weight:600;"><?php echo $remaining; ?> Menit</span></td>
-									<td><a href="?sec_dash=1&unlock=<?php echo urlencode($key); ?>" class="btn-unlock" onclick="return confirm('Buka kunci akun ini sekarang?')">🔓 Quick Unlock (Buka Akun)</a></td>
+									<td><a href="?sec_dash=1&unlock=<?php echo urlencode($key); ?>&csrf=<?php echo urlencode($csrfToken); ?>" class="btn-unlock" onclick="return confirm('Buka kunci akun ini sekarang?')">🔓 Quick Unlock (Buka Akun)</a></td>
 								</tr>
 								<?php endforeach; ?>
 							</tbody>
@@ -540,20 +795,20 @@ class OjsSecurityHardenerPlugin extends GenericPlugin {
 		if (class_exists('\\PKP\\config\\Config')) {
 			$trustForwarded = (bool) \PKP\config\Config::getVar('general', 'trust_x_forwarded_for');
 		} elseif (class_exists('Config')) {
-			$trustForwarded = (bool) \Config::getVar('general', 'trust_x_forwarded_for');
+			$trustForwarded = (bool) Config::getVar('general', 'trust_x_forwarded_for');
 		}
 
-		if (!empty($_SERVER['HTTP_CF_CONNECTING_IP'])) {
-			if ($trustForwarded || filter_var($remoteAddr, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE) === false) {
+		// Only trust proxy headers when trust_x_forwarded_for is explicitly enabled in config.inc.php
+		if ($trustForwarded) {
+			if (!empty($_SERVER['HTTP_CF_CONNECTING_IP']) && filter_var($_SERVER['HTTP_CF_CONNECTING_IP'], FILTER_VALIDATE_IP)) {
 				return $_SERVER['HTTP_CF_CONNECTING_IP'];
 			}
-		}
-
-		if ($trustForwarded && !empty($_SERVER['HTTP_X_FORWARDED_FOR'])) {
-			$ips = explode(',', $_SERVER['HTTP_X_FORWARDED_FOR']);
-			$client = trim($ips[0]);
-			if (filter_var($client, FILTER_VALIDATE_IP)) {
-				return $client;
+			if (!empty($_SERVER['HTTP_X_FORWARDED_FOR'])) {
+				$ips = explode(',', $_SERVER['HTTP_X_FORWARDED_FOR']);
+				$client = trim($ips[0]);
+				if (filter_var($client, FILTER_VALIDATE_IP)) {
+					return $client;
+				}
 			}
 		}
 
@@ -561,34 +816,25 @@ class OjsSecurityHardenerPlugin extends GenericPlugin {
 	}
 
 	public function getStorageDir() {
-		// First priority: OJS private files_dir if available
-		if (class_exists('\\PKP\\config\\Config')) {
-			$filesDir = \PKP\config\Config::getVar('files', 'files_dir');
-			if (!empty($filesDir) && is_dir($filesDir)) {
-				$secDir = rtrim($filesDir, '/') . '/security_hardener';
-				if (!is_dir($secDir)) {
-					@mkdir($secDir, 0775, true);
-				}
-				if (is_dir($secDir) && is_writable($secDir)) {
-					return $secDir;
-				}
+		// Priority 1: OJS private files_dir if available
+		$filesDir = Config::getVar('files', 'files_dir');
+		if (!empty($filesDir) && is_dir($filesDir)) {
+			$secDir = rtrim($filesDir, '/') . '/security_hardener';
+			if (!is_dir($secDir)) {
+				@mkdir($secDir, 0775, true);
 			}
-		} elseif (class_exists('Config')) {
-			$filesDir = \Config::getVar('files', 'files_dir');
-			if (!empty($filesDir) && is_dir($filesDir)) {
-				$secDir = rtrim($filesDir, '/') . '/security_hardener';
-				if (!is_dir($secDir)) {
-					@mkdir($secDir, 0775, true);
-				}
-				if (is_dir($secDir) && is_writable($secDir)) {
-					return $secDir;
-				}
+			if (is_dir($secDir) && is_writable($secDir)) {
+				$this->protectStorageDir($secDir);
+				return $secDir;
 			}
 		}
+
+		// Priority 2: Local data directory within plugin
 		$dir = __DIR__ . '/data';
 		if (!is_dir($dir)) {
 			@mkdir($dir, 0775, true);
 		}
+		$this->protectStorageDir($dir);
 		return $dir;
 	}
 
@@ -632,16 +878,14 @@ class OjsSecurityHardenerPlugin extends GenericPlugin {
 			return $config['master_password'];
 		}
 
-		$generatedPass = '';
-		if (function_exists('random_bytes')) {
-			$generatedPass = 'Sec_' . bin2hex(random_bytes(10)) . '!';
-		} else {
-			$generatedPass = 'Sec_' . substr(md5(uniqid(mt_rand(), true)), 0, 16) . '!';
-		}
+		// Generate secure cryptographic master key
+		$generatedPass = 'Sec_' . bin2hex(random_bytes(10)) . '!';
 
 		$config['master_password'] = $generatedPass;
+		$config['master_password_hash'] = password_hash($generatedPass, PASSWORD_DEFAULT);
 		$config['generated_at'] = date('Y-m-d H:i:s');
 		$this->writeJsonFile($configFile, $config);
+		@chmod($configFile, 0600);
 
 		if (method_exists($this, 'updateSetting')) {
 			$this->updateSetting(0, 'master_password', $generatedPass, 'string');
@@ -673,48 +917,6 @@ class OjsSecurityHardenerPlugin extends GenericPlugin {
 		}
 		@fclose($fp);
 		return $result;
-	}
-
-	public function recordFailedLogin($hookName, $args) {
-		$username = is_array($args) && isset($args[0]) ? strtolower(trim((string)$args[0])) : "unknown";
-		$clientIp = $this->getClientIp();
-		$storageDir = $this->getStorageDir();
-		$lockKey = md5($clientIp . "_" . $username);
-		$attemptsFile = $storageDir . "/attempts.json";
-		$lockFile = $storageDir . "/lockouts.json";
-		$now = time();
-		$self = $this;
-
-		$this->updateJsonAtomic($attemptsFile, function($attempts) use ($lockKey, $username, $clientIp, $now, $lockFile, $self) {
-			if (!isset($attempts[$lockKey]) || ($now - $attempts[$lockKey]['first_at']) > 900) {
-				$attempts[$lockKey] = ['count' => 1, 'first_at' => $now, 'username' => $username, 'ip' => $clientIp];
-			} else {
-				$attempts[$lockKey]['count']++;
-			}
-
-			$count = $attempts[$lockKey]['count'];
-
-			if ($count >= 5) {
-				$self->updateJsonAtomic($lockFile, function($lockouts) use ($lockKey, $username, $clientIp, $now, $count) {
-					$lockouts[$lockKey] = [
-						'username' => $username,
-						'ip' => $clientIp,
-						'locked_at' => $now,
-						'expires' => $now + 300,
-						'attempts' => $count
-					];
-					return $lockouts;
-				});
-				unset($attempts[$lockKey]);
-				$self->logSecurityEvent('ACCOUNT_LOCKED', "Username: $username | IP: $clientIp | Reached 5 failed attempts. Locked 5 mins.", 'LOCKOUT');
-			} else {
-				$self->logSecurityEvent('LOGIN_FAILED', "Username: $username | IP: $clientIp | Attempt $count/5", 'WARNING');
-			}
-
-			return $attempts;
-		});
-
-		return false;
 	}
 
 }
