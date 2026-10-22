@@ -114,3 +114,26 @@ assert(strpos($filtered, 'Minimal 8 karakter') !== false);
 echo "[PASS] Test 11: Register password hint injection under input verified!\n";
 
 echo "\n>>> ALL 11 TESTS PASSED 100% <<<\n";
+
+// Test 12: Private/Loopback subnet detection for reverse proxies
+assert($plugin->isPrivateOrLoopbackIp('127.0.0.1') === true);
+assert($plugin->isPrivateOrLoopbackIp('::1') === true);
+assert($plugin->isPrivateOrLoopbackIp('192.168.1.50') === true);
+assert($plugin->isPrivateOrLoopbackIp('10.0.1.100') === true);
+assert($plugin->isPrivateOrLoopbackIp('172.16.5.4') === true);
+assert($plugin->isPrivateOrLoopbackIp('8.8.8.8') === false);
+assert($plugin->isPrivateOrLoopbackIp('103.125.48.30') === false);
+echo "[PASS] Test 12: Subnet & private IP reverse proxy detection verified!\n";
+
+// Test 13: Trusted proxy X-Forwarded-For resolution
+$_SERVER['REMOTE_ADDR'] = '192.168.1.1';
+$_SERVER['HTTP_X_FORWARDED_FOR'] = '203.0.113.195, 192.168.1.1';
+assert($plugin->getClientIp() === '203.0.113.195');
+
+// Untrusted direct client attempting IP spoofing via X-Forwarded-For
+$_SERVER['REMOTE_ADDR'] = '203.0.113.50';
+$_SERVER['HTTP_X_FORWARDED_FOR'] = '1.1.1.1';
+assert($plugin->getClientIp() === '203.0.113.50');
+echo "[PASS] Test 13: Trusted reverse proxy IP resolution & spoofing prevention verified!\n";
+
+echo "\n>>> ALL 13 ENTERPRISE SECURITY TESTS PASSED 100% <<<\n";

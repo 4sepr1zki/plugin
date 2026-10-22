@@ -807,7 +807,7 @@ class SecurityHardenerCore {
 			}
 		}
 
-		if (in_array($remoteAddr, array('127.0.0.1', '::1', '10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16'))) {
+		if ($this->isPrivateOrLoopbackIp($remoteAddr)) {
 			if (!empty($_SERVER['HTTP_X_FORWARDED_FOR'])) {
 				$ips = explode(',', $_SERVER['HTTP_X_FORWARDED_FOR']);
 				$client = trim($ips[0]);
@@ -818,6 +818,13 @@ class SecurityHardenerCore {
 		}
 
 		return $remoteAddr;
+	}
+
+	public function isPrivateOrLoopbackIp($ip) {
+		if ($ip === '127.0.0.1' || $ip === '::1') {
+			return true;
+		}
+		return filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE) === false;
 	}
 
 	public function getStorageDir() {
