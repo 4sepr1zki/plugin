@@ -39,7 +39,7 @@ class OjsSecurityHardenerPlugin extends GenericPlugin {
 		$success = parent::register($category, $path, $mainContextId);
 
 		// 1. Boot-level XXE Hardening
-		$this->hardenXmlParser();
+		// $this->hardenXmlParser();
 
 		// Check installation status in OJS safely
 		$installed = true;
@@ -147,7 +147,7 @@ class OjsSecurityHardenerPlugin extends GenericPlugin {
 					}
 
 					// 2. CVE-2024-56525: User XML Privilege Escalation (Super Admin Role Injection)
-					if (preg_match('/(ROLE_ID_SITE_ADMIN|<role_id\s+type=[\'"]super_admin[\'"]|<user_group_ref[^>]*>Site Administrator<\/user_group_ref>)/i', $content)) {
+					if (preg_match('/(<role_id>\s*1\s*<\/role_id>|<context_id>\s*0\s*<\/context_id>|<user_group_ref[^>]*>[^<]*Site\s*Admin|<name[^>]*>[^<]*Site\s*Admin|ROLE_ID_SITE_ADMIN)/i', $content)) {
 						$isSiteAdmin = false;
 						if (class_exists('Validation') && method_exists('Validation', 'isSiteAdmin')) {
 							$isSiteAdmin = Validation::isSiteAdmin();
