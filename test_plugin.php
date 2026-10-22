@@ -83,3 +83,34 @@ echo "[PASS] Test 8: Strict HTML/XSS escaping with ENT_QUOTES | ENT_SUBSTITUTE v
 @rmdir($plugin->getStorageDir());
 
 echo "\n>>> ALL 8 ENTERPRISE SECURITY TESTS PASSED 100% <<<\n";
+
+// Test 9: Registration password validation (min 8 chars)
+class MockRegistrationForm {
+    public $data = array();
+    public $errors = array();
+    function getData($k) { return isset($this->data[$k]) ? $this->data[$k] : null; }
+    function addError($field, $msg) { $this->errors[$field] = $msg; }
+}
+
+$mockForm = new MockRegistrationForm();
+$mockForm->data['password'] = 'short';
+$args = array($mockForm);
+$plugin->validateRegistrationPassword('registrationform::validate', $args);
+assert(isset($mockForm->errors['password']));
+echo "[PASS] Test 9: Registration password under 8 characters correctly rejected!\n";
+
+$mockFormOk = new MockRegistrationForm();
+$mockFormOk->data['password'] = 'StrongPass123!';
+$argsOk = array($mockFormOk);
+$plugin->validateRegistrationPassword('registrationform::validate', $argsOk);
+assert(empty($mockFormOk->errors['password']));
+echo "[PASS] Test 10: Valid 8+ characters registration password accepted!\n";
+
+// Test 11: Register password hint HTML injection
+$mockHtml = '<div class="password"><label><input type="password" name="password" id="password"></label></div>';
+$filtered = $plugin->filterRegisterOutput($mockHtml);
+assert(strpos($filtered, 'ojs-password-hint') !== false);
+assert(strpos($filtered, 'Minimal 8 karakter') !== false);
+echo "[PASS] Test 11: Register password hint injection under input verified!\n";
+
+echo "\n>>> ALL 11 TESTS PASSED 100% <<<\n";
